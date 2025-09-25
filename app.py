@@ -716,263 +716,87 @@ if step == "3) Validate & Process":
 # PART 4/5: Filters, Helpers, Core Insight Modules & Charts
 # ============================
 # Date filter
+# ============================
+# PART 4/5: Filters, Helpers, Core Insight Modules & Charts (UPDATED)
+# ============================
+
+# Date filter (unchanged)
 def filter_by_date(df, start_date, end_date):
     if "date" not in df.columns: return df
     m = df.copy(); m["date"] = pd.to_datetime(m["date"], errors="coerce").dt.date
     mask = (m["date"] >= start_date) & (m["date"] <= end_date)
     return m[mask].copy()
+
 filtered_df = filter_by_date(master_df, *st.session_state.date_range)
 
 TH = st.session_state.thresholds
 EXPECTED_CTR = CONFIG["expected_ctr_by_rank"]
 
-# --- Module 1: Striking Distance ---
-def find_striking_distance_keywords(df):
-    d = df.copy()
-    pos_col = next((c for c in ["Position","gsc_avg_position","position","avg_position"] if c in d.columns), None)
-    impr_col = next((c for c in ["Impressions","gsc_impressions","impressions"] if c in d.columns), None)
-    title_col = next((c for c in ["Title","title","headline"] if c in d.columns), None)
-    if not pos_col or not impr_col: return ["**No Striking Distance Insights** — required columns not found."], pd.DataFrame()
-    d[pos_col] = pd.to_numeric(d[pos_col], errors="coerce")
-    d[impr_col] = pd.to_numeric(d[impr_col], errors="coerce").fillna(0)
-    sd = d[(d[pos_col] >= TH["striking_distance_min"]) & (d[pos_col] <= TH["striking_distance_max"]) & (d[impr_col] >= TH["min_impressions"])].copy()
-    if sd.empty: return ["No items currently inside configured striking-distance range."], pd.DataFrame()
-    if "msid" not in sd.columns: return ["**Consolidation unavailable** — `msid` column not found."], pd.DataFrame()
-    if not title_col: title_col="Title_fallback"; sd[title_col]="Untitled"
-    article_agg = (sd.groupby(["msid", title_col], as_index=False).agg(total_impr=(impr_col, "sum"), best_pos=(pos_col, "min")))
-    article_agg.sort_values(by=["total_impr"], ascending=False, inplace=True)
-    out = article_agg.rename(columns={"msid": "MSID", title_col: "Title", "total_impr": "Total Impressions", "best_pos": "Best Avg Position"})
-    out = out[["MSID","Title","Best Avg Position","Total Impressions"]]
-    return [], out
+# --- Module 1 & 2 & 3 (keep your existing working implementations) ---
 
-# --- Module 2: Low CTR ---
-def find_low_ctr_opportunities(df):
-    d = df.copy()
-    pos_col = next((c for c in ["Position","gsc_avg_position"] if c in d.columns), None)
-    ctr_col = next((c for c in ["CTR","gsc_avg_ctr"] if c in d.columns), None)
-    impr_col = next((c for c in ["Impressions","gsc_impressions"] if c in d.columns), None)
-    title_col = next((c for c in ["Title","title","headline"] if c in d.columns), None)
-    if not all([pos_col, ctr_col, impr_col]): return ["**Low CTR** needs position, CTR, impressions."], pd.DataFrame()
-    d[pos_col] = pd.to_numeric(d[pos_col], errors="coerce")
-    d[impr_col] = pd.to_numeric(d[impr_col], errors="coerce").fillna(0)
-    if d[ctr_col].dtype == object:
-        d[ctr_col] = pd.to_numeric(d[ctr_col].astype(str).str.replace("%","", regex=False), errors="coerce")/100.0
-    else:
-        d[ctr_col] = pd.to_numeric(d[ctr_col], errors="coerce")
-    page1 = d[(d[pos_col] > 0) & (d[pos_col] < 10) & (d[impr_col] >= TH["min_impressions"])].copy()
-    if page1.empty: return ["No page-1 items with sufficient impressions."], pd.DataFrame()
-    page1['expected_ctr'] = page1[pos_col].round().clip(1, 9).map(EXPECTED_CTR)
-    page1['ctr_deficit'] = (page1['expected_ctr'] - page1[ctr_col]).clip(lower=0)
-    page1 = page1[page1['ctr_deficit'] >= (TH["ctr_deficit_pct"]/100.0)]
-    if page1.empty: return ["No items below the configured CTR expectation."], pd.DataFrame()
-    page1['opp_score'] = page1['ctr_deficit'] * page1[impr_col]
-    res = page1.sort_values(by='opp_score', ascending=False)
-    result_df = res[['msid', title_col, pos_col, ctr_col, impr_col, 'expected_ctr', 'ctr_deficit']].copy()
-    result_df.rename(columns={'msid':'MSID', title_col:'Title', pos_col:'Best Avg Position', ctr_col:'CTR', impr_col:'Total Impressions', 'expected_ctr':'Expected CTR', 'ctr_deficit':'CTR Deficit'}, inplace=True)
-    return [], result_df
 
-# --- Module 3: Cannibalization (English Titles) ---
-@st.cache_resource(show_spinner=False)
-def load_sentence_transformer():
-    if not _HAS_ST: return None
-    try:
-        return SentenceTransformer("all-MiniLM-L6-v2")
-    except Exception as e:
-        logger.warning(f"SentenceTransformer load failed: {e}"); return None
+# --- Module 4: Engagement vs Search Mismatch (ROBUST & FORGIVING) ---
+def _pick_col(d, candidates):
+    return next((c for c in candidates if c in d.columns), None)
 
-def _normalize(vectors):
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
-    return vectors / norms
-def _cosine_sim_matrix(X):
-    Xn = _normalize(X); return np.clip(Xn @ Xn.T, -1, 1)
-def _tfidf_embed(texts, max_features=5000, ngram_range=(1,2)):
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    vec = TfidfVectorizer(max_features=max_features, ngram_range=ngram_range)
-    M = vec.fit_transform(texts); return M.toarray(), vec
-def _cluster_by_threshold(sim, threshold):
-    n = sim.shape[0]; parent=list(range(n))
-    def find(x):
-        while parent[x]!=x:
-            parent[x]=parent[parent[x]]; x=parent[x]
-        return x
-    def union(a,b):
-        ra, rb = find(a), find(b)
-        if ra!=rb: parent[rb]=ra
-    for i in range(n):
-        for j in range(i+1, n):
-            if sim[i,j] >= threshold: union(i,j)
-    root_to_id, cur = {}, 0; labels=[-1]*n
-    for i in range(n):
-        r=find(i)
-        if r not in root_to_id: root_to_id[r]=cur; cur+=1
-        labels[i]=root_to_id[r]
-    counts = pd.Series(labels).value_counts()
-    valid = set(counts[counts>1].index.tolist())
-    labels = [lbl if lbl in valid else -1 for lbl in labels]
-    return labels
-def _extract_keywords_topk(tfidf_vec, vocab, k=5):
-    idxs = np.argsort(-tfidf_vec)[:k]; return [vocab[i] for i in idxs if tfidf_vec[i] > 0]
-def _keyword_overlap(a, b):
-    if not a or not b: return 0.0
-    sa, sb = set(a), set(b); inter=len(sa&sb); uni=len(sa|sb)
-    return inter/uni if uni else 0.0
+def _build_clicks_proxy(d):
+    # Try useful fallbacks if Clicks is missing
+    if "Impressions" in d.columns and "CTR" in d.columns:
+        imp = pd.to_numeric(d["Impressions"], errors="coerce")
+        ctr = pd.to_numeric(d["CTR"].astype(str).str.replace("%","", regex=False), errors="coerce")
+        ctr = ctr.where(ctr <= 1, ctr/100.0)
+        return (imp * ctr)
+    if "screenPageViews" in d.columns:
+        return pd.to_numeric(d["screenPageViews"], errors="coerce")
+    if "totalUsers" in d.columns:
+        return pd.to_numeric(d["totalUsers"], errors="coerce")
+    return None
 
-def english_cannibalization(df):
-    d = df.copy()
-    if "Title" not in d.columns or "msid" not in d.columns:
-        return ["Analysis unavailable: missing Title or msid."], pd.DataFrame(), pd.DataFrame()
-
-    d["SEO_Title"] = d["Title"].astype(str).fillna("")
-    articles = (
-        d.groupby("msid")
-         .agg(SEO_Title=("SEO_Title","first"),
-              Title=("Title","first"),
-              L2_Category=("L2_Category","first") if "L2_Category" in d.columns else ("L2_Category", lambda x: "Uncategorized"),
-              Impressions=("Impressions","sum") if "Impressions" in d.columns else ("Impressions", lambda x: 0),
-              CTR=("CTR","mean") if "CTR" in d.columns else ("CTR", lambda x: np.nan),
-              Position=("Position","mean") if "Position" in d.columns else ("Position", lambda x: np.nan))
-         .reset_index()
-    )
-    if "L2_Category" not in articles.columns:
-        articles["L2_Category"] = "Uncategorized"
-
-    # Try sentence-transformers; fall back to TF-IDF cosine
-    st_model = load_sentence_transformer()
-    emb = None
-    if st_model is not None:
-        try:
-            emb = st_model.encode(
-                articles["SEO_Title"].tolist(),
-                batch_size=64,
-                show_progress_bar=False,
-                normalize_embeddings=True
-            )
-            sim = emb @ emb.T
-        except Exception as e:
-            logger.warning(f"ST encoding failed, falling back TF-IDF: {e}")
-            emb = None
-
-    Xtfidf, vec = _tfidf_embed(articles["SEO_Title"].tolist())
-    vocab = np.array(vec.get_feature_names_out())
-    tfidf_mat = Xtfidf
-    if emb is None:
-        sim = _cosine_sim_matrix(tfidf_mat)
-
-    labels = _cluster_by_threshold(sim, threshold=TH["similarity_threshold"])
-    articles["similarity_group"] = labels
-
-    cann = articles[articles["similarity_group"] != -1].copy()
-    if cann.empty:
-        return ["No competing content clusters found at current threshold."], pd.DataFrame(), pd.DataFrame()
-
-    # Top keywords per title
-    topk_list = [_extract_keywords_topk(tfidf_mat[i], vocab, k=6) for i in range(tfidf_mat.shape[0])]
-    articles["top_keywords"] = topk_list
-
-    detailed = articles[articles["similarity_group"] != -1].copy()
-    detailed.rename(columns={"msid": "MSID"}, inplace=True)
-
-    # Group theme and confidence
-    theme_rows = []
-    group_conf = []
-    for gid, sub in articles[articles["similarity_group"] != -1].groupby("similarity_group"):
-        # Theme
-        tokens = " ".join(sub["SEO_Title"].tolist()).lower().split()
-        tok_series = pd.Series([t for t in tokens if len(t) > 3])
-        theme = ", ".join(tok_series.value_counts().head(5).index.tolist())
-        theme_rows.append({"similarity_group": gid, "Theme": theme})
-
-        # Confidence from pairwise similarity + keyword overlap
-        idxs = sub.index.tolist()
-        pairs = []
-        for i in range(len(idxs)):
-            for j in range(i + 1, len(idxs)):
-                si, sj = idxs[i], idxs[j]
-                sim_ij = float(sim[si, sj])
-                ko = _keyword_overlap(articles.loc[si, "top_keywords"], articles.loc[sj, "top_keywords"])
-                pairs.append((sim_ij, ko))
-        if pairs:
-            sim_mean = float(np.mean([p[0] for p in pairs]))
-            ko_mean = float(np.mean([p[1] for p in pairs]))
-            conf = 0.7 * sim_mean + 0.3 * ko_mean
-        else:
-            conf = 0.0
-        group_conf.append({"similarity_group": gid, "Cluster Confidence": round(conf, 3)})
-
-    theme_df = pd.DataFrame(theme_rows)
-    group_conf_df = pd.DataFrame(group_conf)
-    detailed = detailed.merge(theme_df, on="similarity_group", how="left").merge(group_conf_df, on="similarity_group", how="left")
-
-    # Keep only useful columns; enrich with Publish Time if present in d
-    keep = ["MSID", "Title", "L2_Category", "Theme", "Position", "CTR", "Impressions", "similarity_group", "Cluster Confidence"]
-    if "Publish Time" in d.columns:
-        detailed = detailed.merge(d[["msid", "Publish Time"]].drop_duplicates().rename(columns={"msid": "MSID"}), on="MSID", how="left")
-        keep.append("Publish Time")
-
-    detailed = detailed[keep].drop_duplicates()
-
-    # High-level category summary
-    summary = (
-        detailed.groupby("L2_Category")
-                .agg(Cannibalization_Count=("MSID", "nunique"))
-                .reset_index()
-                .sort_values("Cannibalization_Count", ascending=False)
-    )
-    return [], summary, detailed
-
-# --- Module 4: Engagement vs Search Mismatch ---
 def engagement_mismatches(df):
     d = df.copy()
 
-    # Try to locate columns
-    dur_col = next((c for c in ["userEngagementDuration","engagement_duration"] if c in d.columns), None)
-    br_col  = next((c for c in ["bounceRate","bounce_rate"] if c in d.columns), None)
-    clicks_col = next((c for c in ["Clicks","gsc_clicks"] if c in d.columns), None)
-    pos_col = next((c for c in ["Position","gsc_avg_position"] if c in d.columns), None)
-    title_col = next((c for c in ["Title","title","headline"] if c in d.columns), "Title")
+    # Column resolution (allow partial availability)
+    dur_col   = _pick_col(d, ["userEngagementDuration","engagement_duration"])
+    br_col    = _pick_col(d, ["bounceRate","bounce_rate"])
+    clicks_col= _pick_col(d, ["Clicks","gsc_clicks"])
+    pos_col   = _pick_col(d, ["Position","gsc_avg_position"])
+    title_col = _pick_col(d, ["Title","title","headline"]) or "Title"
 
-    # Fallbacks for clicks/search signal
-    if not clicks_col:
-        if "Impressions" in d.columns and "CTR" in d.columns:
-            d["__ClicksProxy"] = pd.to_numeric(d.get("Impressions"), errors="coerce") * pd.to_numeric(d.get("CTR"), errors="coerce")
-            clicks_col = "__ClicksProxy"
-        elif "screenPageViews" in d.columns:
-            clicks_col = "screenPageViews"
-        elif "totalUsers" in d.columns:
-            clicks_col = "totalUsers"
-
-    # Need at least one engagement metric
+    # Need at least one engagement signal
     if not dur_col and not br_col:
-        return ["**Engagement Mismatch** needs engagement metrics (duration or bounce). None found."]
+        return ["**Engagement Mismatch** needs engagement metrics (duration and/or bounce). None found."]
 
-    # Need at least one search signal
-    if not clicks_col and not pos_col:
-        return ["**Engagement Mismatch** needs a search signal (Clicks/Impressions×CTR/Pageviews/Users) or Position. None found."]
+    # Build click-like signal
+    if not clicks_col:
+        proxy = _build_clicks_proxy(d)
+        if proxy is None and not pos_col:
+            return ["**Engagement Mismatch** needs a search signal (Clicks/Impressions×CTR/Pageviews/Users) or Position. None found."]
+        if proxy is not None:
+            d["__ClicksProxy"] = proxy
+            clicks_col = "__ClicksProxy"
 
     # Coerce numerics
     for c in [dur_col, br_col, clicks_col, pos_col]:
         if c: d[c] = pd.to_numeric(d[c], errors="coerce")
 
-    # Filter on position if present (cap outliers)
+    # Reasonable filter on position if present
     if pos_col:
         d = d[(d[pos_col].isna()) | (d[pos_col].between(1, 50, inclusive="both"))].copy()
 
-    # Drop rows missing the required pieces (but allow partial fallbacks)
-    req_for_row = [c for c in [clicks_col, dur_col, br_col] if c]
-    d = d.dropna(subset=req_for_row)
-    if d.empty:
-        return ["No articles with complete data for mismatch analysis."]
-
-    # Build engagement score
+    # Build engagement score (rank-based, robust to missing one of dur/bounce)
     parts_e = []
     if dur_col: parts_e.append(d[dur_col].rank(pct=True))
     if br_col:  parts_e.append(1 - d[br_col].rank(pct=True))
+    if not parts_e:
+        return ["No usable engagement signals after cleaning."]
     d["engagement_score"] = np.mean(parts_e, axis=0) if len(parts_e) > 1 else parts_e[0]
 
-    # Build search score
+    # Build search score (click-like rank and optional position rank)
     parts_s = []
     if clicks_col: parts_s.append(d[clicks_col].rank(pct=True))
-    if pos_col:    parts_s.append(1 - d[pos_col].rank(pct=True))
+    if pos_col:    parts_s.append(1 - d[pos_col].rank(pct=True))  # better (lower) position → higher score
+    if not parts_s:
+        return ["No usable search signals after cleaning."]
     d["search_score"] = np.mean(parts_s, axis=0) if len(parts_s) > 1 else parts_s[0]
 
     d["mismatch_score"] = d["engagement_score"] - d["search_score"]
@@ -981,140 +805,199 @@ def engagement_mismatches(df):
         np.where((d["search_score"] > 0.8) & (d["engagement_score"] < 0.2), "Clickbait Risk", None)
     )
 
-    # Sort by absolute mismatch (Streamlit-safe)
+    # Sort by magnitude of mismatch
     mismatches = (
         d.dropna(subset=["mismatch_type"])
          .sort_values(by="mismatch_score", key=np.abs, ascending=False)
          .head(8)
     )
+
     if mismatches.empty:
         return ["No significant mismatches detected."]
 
-    cards = []
+    cards=[]
     for _, row in mismatches.iterrows():
         emoji = "💎" if row["mismatch_type"]=="Hidden Gem" else "⚠️"
-        recs = ([
-            "- **SEO Optimization:** Expand title/H1 & match intent.",
-            "- **Internal Linking:** Add links from high-authority pages.",
-            "- **Content Expansion:** Add related sections."
-        ] if row["mismatch_type"]=="Hidden Gem" else [
-            "- **Content Depth:** Address thin content.",
-            "- **UX:** Improve speed & mobile.",
-            "- **Title Alignment:** Ensure promise matches content."
-        ])
-        goal = (f"_Goal: Leverage high engagement to improve search visibility{'' if not pos_col else f' from position {row[pos_col]:.1f}'}._"
-                if row["mismatch_type"]=="Hidden Gem"
-                else f"_Goal: Improve user experience to match search performance{'' if clicks_col is None else f' (clicks signal present).'}_")
+        if row["mismatch_type"]=="Hidden Gem":
+            recs = [
+                "- **SEO Optimization:** Expand title/H1 & match intent.",
+                "- **Internal Linking:** Add links from high-authority pages.",
+                "- **Content Expansion:** Add related sections."
+            ]
+            goal = f"_Goal: Leverage high engagement to improve search visibility{'' if not pos_col else f' from position {row[pos_col]:.1f}'}._"
+        else:
+            recs = [
+                "- **Content Depth:** Address thin content.",
+                "- **UX:** Improve speed & mobile.",
+                "- **Title Alignment:** Ensure promise matches content."
+            ]
+            goal = f"_Goal: Improve user experience to match search performance{'' if clicks_col is None else f' (clicks signal present).'}_"
+
         with st.expander(f"Why this recommendation? — {emoji} {str(row.get(title_col, 'Untitled'))[:90]}", expanded=False):
             st.write(f"- **Engagement Score**: {row['engagement_score']:.2f}, **Search Score**: {row['search_score']:.2f}")
             if dur_col: st.write(f"- **Duration**: {row[dur_col]:.1f}s")
             if br_col:  st.write(f"- **Bounce**: {row[br_col]:.1%}")
             if pos_col: st.write(f"- **Pos**: {row[pos_col]:.1f}")
+            if clicks_col: st.write(f"- **Clicks-like signal available**")
             conf = min(0.95, 0.5 + abs(row['mismatch_score'])*0.8)
             st.write(f"- **Confidence**: {conf:.2f}")
+
         cards.append(
             f"### {emoji} {row['mismatch_type']}\n"
-            f"**MSID:** `{row.get('msid', '—')}`\n"
+            f"**MSID:** `{row.get('msid','—')}`\n"
             f"**Title:** {row.get(title_col,'Untitled')}\n"
             f"**Engagement Score:** **{row['engagement_score']:.2f}** | **Search Score:** **{row['search_score']:.2f}**\n"
+            + ("**Metrics:** " if any([dur_col, br_col, pos_col]) else "")
+            + (f"Duration: **{row[dur_col]:.1f}s** | " if dur_col else "")
+            + (f"Bounce: **{row[br_col]:.1%}** | " if br_col else "")
+            + (f"Pos: **{row[pos_col]:.1f}**" if pos_col else "")
+            + ("\n\n**Recommendations:**\n" + "\n".join(recs) + f"\n\n{goal}")
         )
     return cards
-# --- Charts & helpers ---
-def export_plot_html(fig, name):
-    if to_html is None:
-        st.info("Plotly HTML export not available in this environment."); return
-    html_str = to_html(fig, include_plotlyjs="cdn", full_html=True)
-    st.download_button("Export Chart (HTML)", data=html_str.encode("utf-8"), file_name=f"{name}.html", mime="text/html")
 
 def scatter_engagement_vs_search(df):
-    if px is None:
-        st.info("Plotly not available for interactive charts."); return
-    dur_col = next((c for c in ["userEngagementDuration","engagement_duration"] if c in df.columns), None)
-    br_col  = next((c for c in ["bounceRate","bounce_rate"] if c in df.columns), None)
-    clicks_col = next((c for c in ["Clicks","gsc_clicks"] if c in df.columns), None)
-    pos_col = next((c for c in ["Position","gsc_avg_position"] if c in df.columns), None)
-    if not all([dur_col, br_col, clicks_col, pos_col]):
-        st.info("Insufficient columns for engagement vs search scatter."); return
+    # Gracefully degrade if columns are missing or plotly is unavailable
+    dur_col   = _pick_col(df, ["userEngagementDuration","engagement_duration"])
+    br_col    = _pick_col(df, ["bounceRate","bounce_rate"])
+    clicks_col= _pick_col(df, ["Clicks","gsc_clicks"])
+    pos_col   = _pick_col(df, ["Position","gsc_avg_position"])
+    if not (dur_col or br_col): 
+        st.info("Insufficient engagement columns for the scatter plot.")
+        return
+    if not (clicks_col or pos_col):
+        st.info("Insufficient search columns for the scatter plot.")
+        return
+
     t = df.copy()
     for c in [dur_col, br_col, clicks_col, pos_col]:
-        t[c] = pd.to_numeric(t[c], errors="coerce")
-    t["engagement_score"] = (t[dur_col].rank(pct=True) + (1 - t[br_col].rank(pct=True))) / 2
-    t["search_score"] = (t[clicks_col].rank(pct=True) + (1 - t[pos_col].rank(pct=True))) / 2
+        if c: t[c] = pd.to_numeric(t[c], errors="coerce")
+
+    # Fallback clicks proxy if needed
+    if not clicks_col:
+        proxy = _build_clicks_proxy(t)
+        if proxy is not None:
+            t["__ClicksProxy"] = proxy
+            clicks_col = "__ClicksProxy"
+
+    parts_e = []
+    if dur_col: parts_e.append(t[dur_col].rank(pct=True))
+    if br_col:  parts_e.append(1 - t[br_col].rank(pct=True))
+    t["engagement_score"] = np.mean(parts_e, axis=0) if len(parts_e) > 1 else parts_e[0]
+
+    parts_s = []
+    if clicks_col: parts_s.append(t[clicks_col].rank(pct=True))
+    if pos_col:    parts_s.append(1 - t[pos_col].rank(pct=True))
+    t["search_score"] = np.mean(parts_s, axis=0) if len(parts_s) > 1 else parts_s[0]
+
     t["L2_Category"] = t.get("L2_Category","Uncategorized")
-    agg = t.groupby(["msid","Title","L2_Category"], as_index=False).agg(engagement_score=("engagement_score","mean"),
-                                                                       search_score=("search_score","mean"),
-                                                                       Position=(pos_col,"mean"),
-                                                                       Clicks=(clicks_col,"sum"))
-    fig = px.scatter(agg, x="engagement_score", y="search_score", size="Clicks", color="L2_Category",
-                     hover_data=["msid","Title","Position","Clicks"], title="Engagement vs Search Performance (Interactive)")
-    st.plotly_chart(fig, use_container_width=True, theme="streamlit"); export_plot_html(fig, "engagement_vs_search")
+
+    agg = t.groupby(["msid","Title","L2_Category"], as_index=False).agg(
+        engagement_score=("engagement_score","mean"),
+        search_score=("search_score","mean"),
+        Position=(pos_col,"mean") if pos_col else ("L2_Category","size"),
+        Clicks=(clicks_col,"sum") if clicks_col else ("L2_Category","size")
+    )
+
+    if px is None:
+        st.info("Plotly not available; showing a basic Streamlit scatter.")
+        st.dataframe(agg[["msid","Title","engagement_score","search_score"]].head(20), use_container_width=True, hide_index=True)
+        return
+
+    fig = px.scatter(
+        agg, x="engagement_score", y="search_score",
+        size="Clicks" if clicks_col else None,
+        color="L2_Category",
+        hover_data=["msid","Title"] + (["Position","Clicks"] if pos_col and clicks_col else []),
+        title="Engagement vs Search Performance (Interactive)"
+    )
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+    export_plot_html(fig, "engagement_vs_search")
+
+# ---------- UI: Module 4 ----------
+st.subheader("Module 4: Engagement vs Search Mismatch")
+cards = run_module_safely("Engagement vs Search", engagement_mismatches, filtered_df)
+cards = cards if isinstance(cards, list) else []
+for c in cards: st.markdown(c)
+scatter_engagement_vs_search(filtered_df)
+st.divider()
 
 # ============================
-# PART 5/5: Category Performance, Trends/Forecast, ROI, Run Modules, Summary
+# PART 5/5: Category Performance, Trends & Forecasts, ROI (UPDATED)
 # ============================
+
+# Heatmap helper (unchanged; works if Plotly available)
 def category_heatmap(df, value_col, title):
     if px is None:
         st.info("Plotly not available for heatmaps."); return
     t = df.copy()
     if "L1_Category" not in t.columns: t["L1_Category"] = "Uncategorized"
     if "L2_Category" not in t.columns: t["L2_Category"] = "Uncategorized"
+    if value_col not in t.columns:
+        st.info(f"Column '{value_col}' not found for heatmap."); return
     agg = t.groupby(["L1_Category","L2_Category"]).agg(val=(value_col,"sum")).reset_index()
     fig = px.density_heatmap(agg, x="L1_Category", y="L2_Category", z="val", color_continuous_scale="Viridis",
                              title=title, histfunc="sum")
     st.plotly_chart(fig, use_container_width=True, theme="streamlit"); export_plot_html(fig, f"heatmap_{value_col}")
 
+# --- Module 5: Category Performance (ROBUST & NO boolean-DF pitfalls) ---
 def analyze_category_performance(df):
     d = df.copy()
-    if "L1_Category" not in d.columns: d["L1_Category"]="Uncategorized"
-    if "L2_Category" not in d.columns: d["L2_Category"]="Uncategorized"
-    if "msid" not in d.columns: d["msid"]=range(len(d))
+    if d.empty: return pd.DataFrame()
+
+    # Ensure categories
+    if "L1_Category" not in d.columns: d["L1_Category"] = "Uncategorized"
+    if "L2_Category" not in d.columns: d["L2_Category"] = "Uncategorized"
+    if "msid" not in d.columns: d["msid"] = range(len(d))
+
+    # Metric candidates
     engagement_col = next((c for c in ["userEngagementDuration","engagement_duration"] if c in d.columns), None)
     pageviews_col  = next((c for c in ["screenPageViews","pageviews"] if c in d.columns), None)
     users_col      = next((c for c in ["totalUsers","users"] if c in d.columns), None)
     clicks_col     = next((c for c in ["Clicks","gsc_clicks"] if c in d.columns), None)
-    traffic_metric_col = pageviews_col or users_col
-    if not any([engagement_col, traffic_metric_col, clicks_col]):
-        return pd.DataFrame({"error":["Category analysis requires traffic, engagement, or clicks."]})
+
+    # If nothing meaningful, return empty
+    if not any([engagement_col, pageviews_col, users_col, clicks_col]):
+        return pd.DataFrame()
+
+    # Coerce numerics where present
     for c in [engagement_col, pageviews_col, users_col, clicks_col]:
         if c: d[c] = pd.to_numeric(d[c], errors="coerce")
-    agg_dict = {"msid":"nunique"}
-    if traffic_metric_col: agg_dict[traffic_metric_col] = "sum"
-    if engagement_col: agg_dict[engagement_col] = "mean"
-    if clicks_col: agg_dict[clicks_col] = "sum"
-    grouped = (d.groupby(["L1_Category","L2_Category"]).agg(agg_dict)
-               .rename(columns={"msid":"total_articles",
-                                traffic_metric_col:"total_traffic" if traffic_metric_col else None,
-                                engagement_col:"avg_engagement_duration" if engagement_col else None,
-                                clicks_col:"total_gsc_clicks" if clicks_col else None})
-               .reset_index())
-    site_avg_traffic = grouped["total_traffic"].mean() if "total_traffic" in grouped.columns else 0
-    site_avg_eng = grouped["avg_engagement_duration"].mean() if "avg_engagement_duration" in grouped.columns else 0
-    grouped["traffic_index"] = (grouped.get("total_traffic", 0) / site_avg_traffic).fillna(0) if site_avg_traffic>0 else 0
+
+    # Choose a traffic column (pageviews preferred)
+    traffic_col = pageviews_col or users_col
+
+    agg = {"msid":"nunique"}
+    if traffic_col:   agg[traffic_col]   = "sum"
+    if engagement_col:agg[engagement_col]= "mean"
+    if clicks_col:    agg[clicks_col]    = "sum"
+
+    grouped = (d.groupby(["L1_Category","L2_Category"])
+                 .agg(agg)
+                 .rename(columns={"msid":"total_articles",
+                                  traffic_col:"total_traffic" if traffic_col else None,
+                                  engagement_col:"avg_engagement_duration" if engagement_col else None,
+                                  clicks_col:"total_gsc_clicks" if clicks_col else None})
+                 .reset_index())
+
+    # Site averages for index calculations
+    site_avg_traffic = grouped["total_traffic"].mean() if "total_traffic" in grouped.columns else 0.0
+    site_avg_eng     = grouped["avg_engagement_duration"].mean() if "avg_engagement_duration" in grouped.columns else 0.0
+
+    grouped["traffic_index"]    = (grouped.get("total_traffic", 0) / site_avg_traffic).fillna(0) if site_avg_traffic>0 else 0
     grouped["engagement_index"] = (grouped.get("avg_engagement_duration", 0) / site_avg_eng).fillna(0) if site_avg_eng>0 else 0
+
     def quadrant(row):
-        ht = row["traffic_index"] >= 1.0; he = row["engagement_index"] >= 1.0
+        ht = row.get("traffic_index",0) >= 1.0
+        he = row.get("engagement_index",0) >= 1.0
         if ht and he: return "Stars"
         if (not ht) and he: return "Hidden Gems"
         if ht and (not he): return "Workhorses"
         return "Underperformers"
-    if "traffic_index" in grouped.columns and "engagement_index" in grouped.columns:
-        grouped["quadrant"] = grouped.apply(quadrant, axis=1)
-    else:
-        grouped["quadrant"] = "N/A"
+
+    grouped["quadrant"] = grouped.apply(quadrant, axis=1) if "traffic_index" in grouped.columns and "engagement_index" in grouped.columns else "N/A"
     return grouped
 
-def time_series_trends(df, metric_col, title):
-    if px is None:
-        st.info("Plotly not available for time-series charts."); return
-    t = df.copy()
-    if "date" not in t.columns:
-        st.info("No date column for time series."); return
-    t["date"] = pd.to_datetime(t["date"], errors="coerce")
-    t = t.dropna(subset=["date"])
-    agg = t.groupby("date")[metric_col].sum().reset_index()
-    fig = px.line(agg, x="date", y=metric_col, title=title)
-    st.plotly_chart(fig, use_container_width=True, theme="streamlit"); export_plot_html(fig, f"time_series_{metric_col}")
-
+# --- Module 6: Trends & Forecasts (RESILIENT) ---
 def forecast_series(daily_series, periods=14):
     daily_series = daily_series.asfreq("D").fillna(method="ffill")
     if _HAS_STM and len(daily_series) >= 14:
@@ -1128,252 +1011,85 @@ def forecast_series(daily_series, periods=14):
             return pd.DataFrame({"date": fc.index, "forecast": fc.values, "low": lower.values, "high": upper.values})
         except Exception as e:
             logger.warning(f"Forecasting failed, fallback: {e}")
+    # Fallback: last 7-day average flat forecast
     roll = daily_series.rolling(7, min_periods=1).mean()
     last = float(roll.iloc[-1]) if not roll.empty else 0.0
     idx = pd.date_range(daily_series.index.max()+pd.Timedelta(days=1), periods=periods, freq="D")
     fc = pd.Series([last]*periods, index=idx)
     return pd.DataFrame({"date": fc.index, "forecast": fc.values, "low": fc.values*0.9, "high": fc.values*1.1})
 
-def what_if_ctr_gain(impr, ctr, ctr_increase_pct):
-    ctr_new = ctr * (1 + ctr_increase_pct/100.0)
-    return impr * (ctr_new - ctr)
-def expected_ctr_from_rank(rank_rounded):
-    return EXPECTED_CTR.get(int(np.clip(int(round(rank_rounded)), 1, 9)), 0.03)
-def what_if_position_improvement(impr, current_pos, new_pos):
-    base_ctr = expected_ctr_from_rank(round(current_pos))
-    new_ctr  = expected_ctr_from_rank(round(new_pos))
-    return impr * (new_ctr - base_ctr)
+def time_series_trends(df, metric_col, title):
+    if "date" not in df.columns:
+        st.info("No date column for time series."); return
+    t = df.copy()
+    t["date"] = pd.to_datetime(t["date"], errors="coerce")
+    t = t.dropna(subset=["date"])
+    if t.empty:
+        st.info("No valid dates after parsing."); return
+    if metric_col not in t.columns:
+        st.info(f"Metric '{metric_col}' not found in data."); return
+    t[metric_col] = pd.to_numeric(t[metric_col], errors="coerce").fillna(0)
+    agg = t.groupby("date")[metric_col].sum().reset_index()
 
-# ---- Fail-safe wrapper ----
-def run_module_safely(label: str, fn, *args, **kwargs):
-    try:
-        return fn(*args, **kwargs)
-    except Exception as e:
-        st.warning(f"Module '{label}' encountered an issue and was skipped. Details: {type(e).__name__}: {e}")
-        logger.exception(f"[ModuleFail] {label}: {e}")
-        return None
+    if px is None:
+        st.line_chart(agg.set_index("date")[metric_col])
+        return
 
-# ================= UI: Insights =================
-st.header("Insights")
+    fig = px.line(agg, x="date", y=metric_col, title=title)
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit"); export_plot_html(fig, f"time_series_{metric_col}")
 
-# 1) Striking Distance
-st.subheader("Module 1: Striking Distance Keywords")
-
-sd_errs: List[str] = []
-sd_df = pd.DataFrame()
-out = run_module_safely("Striking Distance", find_striking_distance_keywords, filtered_df)
-if out is not None:
-    sd_errs, sd_df = out
-
-if sd_df is not None and not sd_df.empty:
-    top = sd_df.head(10).copy()
-    top["Best Avg Position"] = top["Best Avg Position"].round(1)
-    top["Total Impressions"] = top["Total Impressions"].astype(int).map(lambda x: f"{x:,}")
-    st.dataframe(top, use_container_width=True, hide_index=True)
-
-    st.download_button(
-        label=f"Download All ({len(sd_df)})",
-        data=sd_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"striking_distance_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv"
-    )
-
-    # Recommendations & Explanations (Top 5)
-    st.markdown("**Recommendations & Explanations (Top 5)**")
-    show5 = sd_df.head(5).copy()
-    for _, r in show5.iterrows():
-        msid = int(r["MSID"]) if pd.notna(r["MSID"]) else -1
-        with st.expander(f"Why this recommendation? — [{msid}] {str(r['Title'])[:90]}"):
-            best_pos = float(r["Best Avg Position"])
-            impressions = int(float(r["Total Impressions"]))
-
-            st.write(f"- **Best Avg Position**: {best_pos:.1f}")
-            st.write(f"- **Impressions**: {impressions:,}")
-
-            rank_round = int(round(best_pos))
-            site_avg_ctr = EXPECTED_CTR.get(rank_round, 0.03)
-            st.write(f"- **Site Avg CTR by rank**: {site_avg_ctr:.2%}")
-
-            ctr_gain = st.slider(
-                f"CTR improvement (%) for MSID {msid}",
-                min_value=1, max_value=20, value=5, key=f"sd_ctr_{msid}"
-            )
-            delta_clicks = what_if_ctr_gain(impressions, expected_ctr_from_rank(best_pos), ctr_gain)
-            st.write(f"- Estimated extra clicks: **{int(delta_clicks):,}**")
-else:
-    for e in (sd_errs or []):
-        st.info(e)
-
-st.divider()
-
-# 2) Low CTR
-st.subheader("Module 2: Low CTR Opportunities")
-
-low_errs: List[str] = []
-low_df = pd.DataFrame()
-out2 = run_module_safely("Low CTR", find_low_ctr_opportunities, filtered_df)
-if out2 is not None:
-    low_errs, low_df = out2
-
-if low_df is not None and not low_df.empty:
-    t10 = low_df.head(10).copy()
-    t10['Best Avg Position'] = t10['Best Avg Position'].map('{:.1f}'.format)
-    t10['CTR'] = t10['CTR'].map('{:.2%}'.format)
-    t10['Expected CTR'] = t10['Expected CTR'].map('{:.2%}'.format)
-    t10['CTR Deficit'] = t10['CTR Deficit'].map('{:.2%}'.format)
-    t10['Total Impressions'] = t10['Total Impressions'].map('{:,.0f}'.format)
-    st.dataframe(t10, use_container_width=True, hide_index=True)
-
-    st.download_button(
-        label=f"Download All ({len(low_df)})",
-        data=low_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"low_ctr_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv"
-    )
-
-    st.markdown("**Why these items? (Explainable AI)**")
-    for _, row in low_df.head(5).iterrows():
-        msid_i = int(row['MSID']) if pd.notna(row['MSID']) else -1
-        with st.expander(f"Why this? — [{msid_i}] {str(row['Title'])[:90]}"):
-            pos_val = float(row['Best Avg Position'])
-            ctr_val = float(str(row['CTR']).replace('%',''))/100.0 if isinstance(row['CTR'], str) else float(row['CTR'])
-            exp_ctr = float(row['Expected CTR'])
-            deficit = float(row['CTR Deficit'])
-            imps = int(float(row['Total Impressions']))
-
-            st.write(f"- **Position**: {pos_val:.1f}, **CTR**: {ctr_val:.2%}, **Expected**: {exp_ctr:.2%}")
-            st.write(f"- **Deficit**: {deficit:.2%}, **Impressions**: {imps:,}")
-
-            conf = min(0.98, 0.4 + (deficit*100)/10.0)
-            st.write(f"- **Confidence**: {conf:.2f}")
-
-            ctr_add = st.slider(
-                f"CTR lift (%) for MSID {msid_i}",
-                min_value=1, max_value=20, value=5, key=f"low_ctr_{msid_i}"
-            )
-            extra_clicks = what_if_ctr_gain(imps, ctr_val, ctr_add)
-            st.write(f"- Extra clicks if CTR +{ctr_add}%: **{int(extra_clicks):,}**")
-else:
-    for e in (low_errs or []):
-        st.info(e)
-
-st.divider()
-# 3) Cannibalization
-st.subheader("Module 3: Content Cannibalization — English SEO Titles")
-with st.spinner("Clustering SEO titles & computing semantic similarity..."):
-    errs, summary_df, detailed_df = run_module_safely("Cannibalization", english_cannibalization, filtered_df) or (["Cannibalization failed."], pd.DataFrame(), pd.DataFrame())
-if errs:
-    for e in errs: st.info(e)
-else:
-    st.subheader("Categories with Competing Articles")
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
-    st.download_button("Download Detailed Cannibalization CSV", detailed_df.to_csv(index=False).encode("utf-8"),
-                       file_name=f"cannibalization_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", mime="text/csv")
-    st.divider()
-    cats_with_issues = summary_df[summary_df['Cannibalization_Count'] > 1]['L2_Category'].unique().tolist()
-    if cats_with_issues:
-        tabs = st.tabs(cats_with_issues)
-        for i, cat in enumerate(cats_with_issues):
-            with tabs[i]:
-                subset = detailed_df[detailed_df['L2_Category']==cat]
-                for gid, group in subset.groupby("similarity_group"):
-                    if len(group) < 2: continue
-                    st.write(f"**Competition Group {gid}** — Theme: _{group['Theme'].iloc[0]}_ | Confidence: **{group['Cluster Confidence'].iloc[0]:.2f}**")
-                    disp_cols = ["MSID","Title","Position","CTR","Impressions","Publish Time"]
-                    disp = group[disp_cols].copy()
-                    if "Position" in disp.columns: disp["Position"] = disp["Position"].map(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
-                    if "CTR" in disp.columns:      disp["CTR"]      = disp["CTR"].map(lambda x: f"{x:.2%}" if pd.notna(x) else "N/A")
-                    if "Impressions" in disp.columns: disp["Impressions"] = disp["Impressions"].map(lambda x: f"{int(x):,}" if pd.notna(x) else "N/A")
-                    st.dataframe(disp, use_container_width=True, hide_index=True)
-                    with st.expander("Why this recommendation?"):
-                        st.write("- High title similarity and keyword overlap suggests internal competition for similar queries.")
-                        st.write("- Consider consolidation/redirects, canonicalization, or differentiating angles & intents.")
-                    st.markdown("---")
-    else:
-        st.info("No categories with multiple competing articles at current thresholds.")
-st.divider()
-
-# 4) Engagement vs Search
-st.subheader("Module 4: Engagement vs Search Mismatch")
-cards = run_module_safely("Engagement vs Search", engagement_mismatches, filtered_df) or []
-for c in cards: st.markdown(c)
-scatter_engagement_vs_search(filtered_df)
-st.divider()
-
-# 5) Category Performance
+# ---------- UI: Module 5 ----------
 st.subheader("Module 5: Category Performance")
 cat_df = run_module_safely("Category Performance", analyze_category_performance, filtered_df)
-if not isinstance(cat_df, pd.DataFrame):
-    cat_df = pd.DataFrame()
-if cat_df.empty or ("error" in cat_df.columns):
-    st.info("Category Performance could not be computed.")
+if not isinstance(cat_df, pd.DataFrame) or cat_df.empty:
+    st.info("Category Performance could not be computed (missing required metrics or categories).")
 else:
     st.dataframe(cat_df, use_container_width=True, hide_index=True)
-    if px is not None and "total_traffic" in cat_df.columns and cat_df["total_traffic"].sum() > 0:
+    # Optional charts
+    if "total_traffic" in cat_df.columns and cat_df["total_traffic"].sum() > 0:
         st.subheader("Interactive Heatmap — Category Traffic")
-        category_heatmap(filtered_df, "screenPageViews" if "screenPageViews" in filtered_df.columns else "totalUsers", "Category Performance Matrix (Traffic)")
+        # Pick the right value_col from the raw filtered_df for heatmap
+        value_col = "screenPageViews" if "screenPageViews" in filtered_df.columns else ("totalUsers" if "totalUsers" in filtered_df.columns else None)
+        if value_col:
+            category_heatmap(filtered_df, value_col, "Category Performance Matrix (Traffic)")
+    if "total_gsc_clicks" in cat_df.columns and cat_df["total_gsc_clicks"].sum() > 0:
+        st.subheader("Top L2 Categories by GSC Clicks")
+        st.bar_chart(cat_df.nlargest(10, "total_gsc_clicks").set_index("L2_Category")["total_gsc_clicks"])
 st.divider()
 
-# 6) Trends & Forecasts (simplified)
+# ---------- UI: Module 6 ----------
 st.subheader("Module 6: Trends & Forecasts")
 if "date" in filtered_df.columns:
-    filtered_df["date"] = pd.to_datetime(filtered_df["date"], errors="coerce")
-    perf_col = "totalUsers" if "totalUsers" in filtered_df.columns else ("screenPageViews" if "screenPageViews" in filtered_df.columns else ("Clicks" if "Clicks" in filtered_df.columns else None))
+    tdf = filtered_df.copy()
+    tdf["date"] = pd.to_datetime(tdf["date"], errors="coerce")
+    tdf = tdf.dropna(subset=["date"])
+    perf_col = "totalUsers" if "totalUsers" in tdf.columns else ("screenPageViews" if "screenPageViews" in tdf.columns else ("Clicks" if "Clicks" in tdf.columns else None))
     if perf_col:
-        daily = filtered_df.groupby("date")[perf_col].sum().asfreq("D").fillna(0)
+        daily = tdf.groupby("date")[perf_col].sum().asfreq("D").fillna(0)
         fc = forecast_series(daily, periods=14)
-        if px is not None and go is not None:
+
+        if go is not None and px is not None:
             base = daily.reset_index().rename(columns={"index":"date", perf_col:"value"})
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=base["date"], y=base["value"], name="History", mode="lines"))
             fig.add_trace(go.Scatter(x=fc["date"], y=fc["forecast"], name="Forecast", mode="lines"))
-            fig.add_trace(go.Scatter(x=pd.concat([fc["date"], fc["date"][::-1]]),
-                                     y=pd.concat([fc["high"], fc["low"][::-1]]),
-                                     fill="toself", fillcolor="rgba(0,0,0,0.1)", line=dict(width=0), name="Confidence"))
+            fig.add_trace(go.Scatter(
+                x=pd.concat([fc["date"], fc["date"][::-1]]),
+                y=pd.concat([fc["high"], fc["low"][::-1]]),
+                fill="toself", fillcolor="rgba(0,0,0,0.1)", line=dict(width=0), name="Confidence"
+            ))
             fig.update_layout(title="Overall Traffic Forecast (next 14 days)")
             st.plotly_chart(fig, use_container_width=True, theme="streamlit"); export_plot_html(fig, "forecast_overall")
-        time_series_trends(filtered_df, {"Position":"Position","CTR":"CTR","Impressions":"Impressions"}.get("Impressions" if "Impressions" in filtered_df.columns else "CTR", "Position"),
-                           "Key Metric Over Time")
+        else:
+            st.line_chart(daily, height=240)
+        # Also show a simple time series for best-available metric among Impressions/CTR/Position
+        key_metric = "Impressions" if "Impressions" in tdf.columns else ("CTR" if "CTR" in tdf.columns else ("Position" if "Position" in tdf.columns else None))
+        if key_metric:
+            time_series_trends(tdf, key_metric, f"{key_metric} Over Time")
     else:
         st.info("Need Users/Pageviews/Clicks for forecasting.")
 else:
     st.info("No date column for forecasting.")
 st.divider()
 
-# 7) ROI & What-ifs
-st.subheader("Module 7: What-if & ROI Estimators")
-c_col1, c_col2 = st.columns(2)
-with c_col1:
-    st.write("**CTR Improvement Impact**")
-    impr = st.number_input("Impressions", min_value=0, value=10000, step=1000)
-    ctr  = st.number_input("Current CTR (%)", min_value=0.0, max_value=100.0, value=2.5, step=0.1)
-    lift = st.slider("CTR Increase (%)", 0, 50, 5)
-    gain = what_if_ctr_gain(impr, ctr/100.0, lift)
-    st.write(f"Estimated extra clicks: **{int(gain):,}**")
-with c_col2:
-    st.write("**Position Improvement Impact**")
-    impr2  = st.number_input("Impressions (pos what-if)", min_value=0, value=20000, step=1000)
-    pos_now= st.number_input("Current Avg Position", min_value=1.0, max_value=50.0, value=12.0, step=0.1)
-    pos_new= st.number_input("New Avg Position (target)", min_value=1.0, max_value=50.0, value=8.0, step=0.1)
-    pgain  = what_if_position_improvement(impr2, pos_now, pos_new)
-    st.write(f"Estimated extra clicks: **{int(pgain):,}**")
-st.divider()
-
-# 8) Executive Summary Export
-st.subheader("Executive Summary Export")
-summary_sections = {
-    "period": f"{st.session_state.date_range[0]} → {st.session_state.date_range[1]}",
-    "striking_distance_top5": (out[1].head(5).to_dict(orient="records") if out and isinstance(out, tuple) and not out[1].empty else []),
-    "low_ctr_top5": (out2[1].head(5).to_dict(orient="records") if out2 and isinstance(out2, tuple) and not out2[1].empty else []),
-}
-summary_json = json.dumps(summary_sections, indent=2, default=str)
-st.download_button("Download Executive Summary (JSON)", data=summary_json.encode("utf-8"),
-                   file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
-
-st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
-
-
-
-
-
-
+# --- (Leave the rest of Part 5 — ROI & What-ifs, Executive Summary, etc. — as in your current code) ---
