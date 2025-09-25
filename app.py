@@ -440,7 +440,7 @@ if step == "2) Upload & Map Columns":
         ga4_map["engagement"]= c5.selectbox("Engagement Duration", ga4_df_raw.columns, index=max(0, ga4_df_raw.columns.get_loc(ga4_map_guess.get("engagement","")) ) if ga4_map_guess.get("engagement") in ga4_df_raw.columns else 0)
         ga4_map["bounce"]    = st.selectbox("Bounce Rate", ga4_df_raw.columns, index=max(0, ga4_df_raw.columns.get_loc(ga4_map_guess.get("bounce","")) ) if ga4_map_guess.get("bounce") in ga4_df_raw.columns else 0)
 
-     with st.expander("GSC Mapping", expanded=True):
+    with st.expander("GSC Mapping", expanded=True):
         c1, c2, c3 = st.columns(3)
         c4, c5, c6, c7 = st.columns(4)
         gsc_map = {}
