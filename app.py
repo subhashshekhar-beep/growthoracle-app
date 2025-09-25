@@ -248,6 +248,8 @@ def _guess_colmap(prod_df, ga4_df, gsc_df):
         "impr":"Impressions" if "Impressions" in gsc_df.columns else next((c for c in gsc_df.columns if "impr" in c.lower()), None),
         "ctr":"CTR" if "CTR" in gsc_df.columns else next((c for c in gsc_df.columns if "ctr" in c.lower()), None),
         "pos":"Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
+        "clicks": "Clicks" if "Clicks" in gsc_df.columns else next((c for c in gsc_df.columns if "click" in c.lower()), None), # ADD THIS LINE
+    "pos":"Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
     }
     return prod_map, ga4_map, gsc_map
 
@@ -262,6 +264,7 @@ def guess_colmap_enhanced(prod_df, ga4_df, gsc_df):
         for c in detect_date_cols(gsc_df):
             if c.lower()=="date": gsc_map["date"]=c; break
     return prod_map, ga4_map, gsc_map
+    
 
 def validate_columns_presence(prod_map, ga4_map, gsc_map, vc: ValidationCollector):
     req_prod = ["msid"]; req_ga4 = ["msid"]; req_gsc = ["date","page","query","impr","pos"]
@@ -437,15 +440,18 @@ if step == "2) Upload & Map Columns":
         ga4_map["engagement"]= c5.selectbox("Engagement Duration", ga4_df_raw.columns, index=max(0, ga4_df_raw.columns.get_loc(ga4_map_guess.get("engagement","")) ) if ga4_map_guess.get("engagement") in ga4_df_raw.columns else 0)
         ga4_map["bounce"]    = st.selectbox("Bounce Rate", ga4_df_raw.columns, index=max(0, ga4_df_raw.columns.get_loc(ga4_map_guess.get("bounce","")) ) if ga4_map_guess.get("bounce") in ga4_df_raw.columns else 0)
 
-    with st.expander("GSC Mapping", expanded=True):
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        gsc_map = {}
-        gsc_map["date"] = c1.selectbox("Date", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("date","")) ) if gsc_map_guess.get("date") in gsc_df_raw.columns else 0)
-        gsc_map["page"] = c2.selectbox("Page URL", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("page","")) ) if gsc_map_guess.get("page") in gsc_df_raw.columns else 0)
-        gsc_map["query"]= c3.selectbox("Query", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("query","")) ) if gsc_map_guess.get("query") in gsc_df_raw.columns else 0)
-        gsc_map["impr"] = c4.selectbox("Impressions", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("impr","")) ) if gsc_map_guess.get("impr") in gsc_df_raw.columns else 0)
-        gsc_map["ctr"]  = c5.selectbox("CTR", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("ctr","")) ) if gsc_map_guess.get("ctr") in gsc_df_raw.columns else 0)
-        gsc_map["pos"]  = c6.selectbox("Position", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("pos","")) ) if gsc_map_guess.get("pos") in gsc_df_raw.columns else 0)
+   with st.expander("GSC Mapping", expanded=True):
+    c1, c2, c3 = st.columns(3)
+    c4, c5, c6, c7 = st.columns(4)
+    gsc_map = {}
+    gsc_map["date"]   = c1.selectbox("Date", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("date","")) ) if gsc_map_guess.get("date") in gsc_df_raw.columns else 0)
+    gsc_map["page"]   = c2.selectbox("Page URL", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("page","")) ) if gsc_map_guess.get("page") in gsc_df_raw.columns else 0)
+    gsc_map["query"]  = c3.selectbox("Query", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("query","")) ) if gsc_map_guess.get("query") in gsc_df_raw.columns else 0)
+    
+    gsc_map["clicks"] = c4.selectbox("Clicks", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("clicks","")) ) if gsc_map_guess.get("clicks") in gsc_df_raw.columns else 0)
+    gsc_map["impr"]   = c5.selectbox("Impressions", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("impr","")) ) if gsc_map_guess.get("impr") in gsc_df_raw.columns else 0)
+    gsc_map["ctr"]    = c6.selectbox("CTR", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("ctr","")) ) if gsc_map_guess.get("ctr") in gsc_df_raw.columns else 0)
+    gsc_map["pos"]    = c7.selectbox("Position", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("pos","")) ) if gsc_map_guess.get("pos") in gsc_df_raw.columns else 0)
 
     # quick validation
     _ = validate_columns_presence(prod_map, ga4_map, gsc_map, vc_read)
@@ -537,10 +543,12 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
     if ga4_map.get("engagement") in ga4_df.columns:ga4_df.rename(columns={ga4_map["engagement"]: "userEngagementDuration"}, inplace=True)
     if ga4_map.get("bounce") in ga4_df.columns:    ga4_df.rename(columns={ga4_map["bounce"]: "bounceRate"}, inplace=True)
 
-    gsc_ren = {
-        gsc_map["date"]: "date", gsc_map["page"]: "page_url", gsc_map["query"]: "Query",
-        gsc_map["impr"]: "Impressions", gsc_map.get("ctr","CTR"): "CTR", gsc_map["pos"]: "Position"
-    }
+    # Inside process_uploaded_files
+gsc_ren = {
+    gsc_map["date"]: "date", gsc_map["page"]: "page_url", gsc_map["query"]: "Query",
+    gsc_map["clicks"]: "Clicks", # ADD THIS LINE
+    gsc_map["impr"]: "Impressions", gsc_map.get("ctr","CTR"): "CTR", gsc_map["pos"]: "Position"
+}
     for k in list(gsc_ren.keys()):
         if k not in gsc_df.columns:
             vc.add("Critical","MISSING_COL",f"GSC missing required column '{k}'"); return None, vc
@@ -824,14 +832,20 @@ def english_cannibalization(df):
     if emb is None:
         sim = _cosine_sim_matrix(tfidf_mat)
     labels = _cluster_by_threshold(sim, threshold=TH["similarity_threshold"])
-    articles["similarity_group"] = labels
-    cann = articles[articles["similarity_group"] != -1].copy()
-    if cann.empty: return ["No competing content clusters found at current threshold."], pd.DataFrame(), pd.DataFrame()
-    topk_list = [_extract_keywords_topk(tfidf_mat[i], vocab, k=6) for i in range(tfidf_mat.shape[0])]
-    articles["top_keywords"] = topk_list
-    detailed = cann.merge(d[["msid","Title","L2_Category","Impressions","CTR","Position","Publish Time"]],
-                          on=["msid","Title","L2_Category"], how="left")
-    detailed.rename(columns={"msid":"MSID"}, inplace=True)
+    # ... inside english_cannibalization after labels are calculated
+articles["similarity_group"] = labels
+cann = articles[articles["similarity_group"] != -1].copy()
+if cann.empty: return ["No competing content clusters found at current threshold."], pd.DataFrame(), pd.DataFrame()
+topk_list = [_extract_keywords_topk(tfidf_mat[i], vocab, k=6) for i in range(tfidf_mat.shape[0])]
+articles["top_keywords"] = topk_list
+
+# OLD problematic merge
+# detailed = cann.merge(d[["msid","Title","L2_Category","Impressions","CTR","Position","Publish Time"]],
+#                      on=["msid","Title","L2_Category"], how="left")
+
+# NEW safer merge
+detailed = articles[articles["similarity_group"] != -1].copy()
+detailed.rename(columns={"msid":"MSID"}, inplace=True)
     theme_rows=[]
     for gid, sub in articles[articles["similarity_group"]!=-1].groupby("similarity_group"):
         tokens = " ".join(sub["SEO_Title"].tolist()).lower().split()
@@ -1059,7 +1073,7 @@ if out is not None:
         show5 = sd_df.head(5)
         for _, r in show5.iterrows():
             msid = r["MSID"]
-            with st.expander(f"Why this recommendation? — [{msid}] {r['Title'][:90]}"):
+                with st.expander(f"Why this recommendation? — [{msid}] {r['Title'][:90]}"):
                 st.write(f"- **Best Avg Position**: {r['Best Avg Position']:.1f}")
                 st.write(f"- **Impressions**: {int(float(r['Total Impressions'])):,}") # Corrected line
                 st.write(f"- **Site Avg CTR by rank**: {EXPECTED_CTR.get(int(round(r['Best Avg Position'])), 0.03):.2%}")
@@ -1210,6 +1224,4 @@ summary_json = json.dumps(summary_sections, indent=2, default=str)
 st.download_button("Download Executive Summary (JSON)", data=summary_json.encode("utf-8"),
                    file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
 
-
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
-
