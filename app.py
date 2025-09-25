@@ -1140,7 +1140,6 @@ for _, r in show5.iterrows():
         )
         delta_clicks = what_if_ctr_gain(impressions, expected_ctr_from_rank(best_pos), ctr_gain)
         st.write(f"- Estimated extra clicks: **{int(delta_clicks):,}**")
-
     else:
         for e in (err or []): st.info(e)
 st.divider()
@@ -1285,6 +1284,7 @@ st.download_button("Download Executive Summary (JSON)", data=summary_json.encode
                    file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
 
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
+
 
 
 
