@@ -1117,18 +1117,30 @@ if out is not None:
         st.download_button(label=f"Download All ({len(sd_df)})",
                            data=sd_df.to_csv(index=False).encode("utf-8"),
                            file_name=f"striking_distance_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", mime="text/csv")
-        st.markdown("**Recommendations & Explanations (Top 5)**")
-        show5 = sd_df.head(5)
-        for _, r in show5.iterrows():
-           msid = r["MSID"]
-                with st.expander(f"Why this recommendation? — [{msid}] {r['Title'][:90]}"):
-                st.write(f"- **Best Avg Position**: {r['Best Avg Position']:.1f}")
-                st.write(f"- **Impressions**: {int(float(r['Total Impressions'])):,}") # Corrected line
-                st.write(f"- **Site Avg CTR by rank**: {EXPECTED_CTR.get(int(round(r['Best Avg Position'])), 0.03):.2%}")
-                imp_num = int(float(r['Total Impressions'])) # Corrected line
-                ctr_gain = st.slider(f"CTR improvement (%) for MSID {msid}", 1, 20, 5, key=f"sd_ctr_{msid}")
-                delta_clicks = what_if_ctr_gain(imp_num, expected_ctr_from_rank(r["Best Avg Position"]), ctr_gain)
-                st.write(f"- Estimated extra clicks: **{int(delta_clicks):,}**")
+        # Recommendations & Explanations (Top 5)
+st.markdown("**Recommendations & Explanations (Top 5)**")
+show5 = sd_df.head(5).copy()
+
+for _, r in show5.iterrows():
+    msid = int(r["MSID"]) if pd.notna(r["MSID"]) else -1
+    with st.expander(f"Why this recommendation? — [{msid}] {str(r['Title'])[:90]}"):
+        best_pos = float(r["Best Avg Position"])
+        impressions = int(float(r["Total Impressions"]))
+
+        st.write(f"- **Best Avg Position**: {best_pos:.1f}")
+        st.write(f"- **Impressions**: {impressions:,}")
+
+        rank_round = int(round(best_pos))
+        site_avg_ctr = EXPECTED_CTR.get(rank_round, 0.03)
+        st.write(f"- **Site Avg CTR by rank**: {site_avg_ctr:.2%}")
+
+        ctr_gain = st.slider(
+            f"CTR improvement (%) for MSID {msid}",
+            min_value=1, max_value=20, value=5, key=f"sd_ctr_{msid}"
+        )
+        delta_clicks = what_if_ctr_gain(impressions, expected_ctr_from_rank(best_pos), ctr_gain)
+        st.write(f"- Estimated extra clicks: **{int(delta_clicks):,}**")
+
     else:
         for e in (err or []): st.info(e)
 st.divider()
@@ -1273,5 +1285,6 @@ st.download_button("Download Executive Summary (JSON)", data=summary_json.encode
                    file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
 
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
+
 
 
