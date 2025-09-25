@@ -1106,73 +1106,106 @@ st.header("Insights")
 
 # 1) Striking Distance
 st.subheader("Module 1: Striking Distance Keywords")
+
+sd_errs: List[str] = []
+sd_df = pd.DataFrame()
 out = run_module_safely("Striking Distance", find_striking_distance_keywords, filtered_df)
 if out is not None:
-    err, sd_df = out
-    if not sd_df.empty:
-        top = sd_df.head(10).copy()
-        top["Best Avg Position"] = top["Best Avg Position"].round(1)
-        top["Total Impressions"] = top["Total Impressions"].astype(int).map(lambda x: f"{x:,}")
-        st.dataframe(top, use_container_width=True, hide_index=True)
-        st.download_button(label=f"Download All ({len(sd_df)})",
-                           data=sd_df.to_csv(index=False).encode("utf-8"),
-                           file_name=f"striking_distance_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", mime="text/csv")
-        # Recommendations & Explanations (Top 5)
-st.markdown("**Recommendations & Explanations (Top 5)**")
-show5 = sd_df.head(5).copy()
+    sd_errs, sd_df = out
 
-for _, r in show5.iterrows():
-    msid = int(r["MSID"]) if pd.notna(r["MSID"]) else -1
-    with st.expander(f"Why this recommendation? — [{msid}] {str(r['Title'])[:90]}"):
-        best_pos = float(r["Best Avg Position"])
-        impressions = int(float(r["Total Impressions"]))
+if sd_df is not None and not sd_df.empty:
+    top = sd_df.head(10).copy()
+    top["Best Avg Position"] = top["Best Avg Position"].round(1)
+    top["Total Impressions"] = top["Total Impressions"].astype(int).map(lambda x: f"{x:,}")
+    st.dataframe(top, use_container_width=True, hide_index=True)
 
-        st.write(f"- **Best Avg Position**: {best_pos:.1f}")
-        st.write(f"- **Impressions**: {impressions:,}")
+    st.download_button(
+        label=f"Download All ({len(sd_df)})",
+        data=sd_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"striking_distance_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
 
-        rank_round = int(round(best_pos))
-        site_avg_ctr = EXPECTED_CTR.get(rank_round, 0.03)
-        st.write(f"- **Site Avg CTR by rank**: {site_avg_ctr:.2%}")
+    # Recommendations & Explanations (Top 5)
+    st.markdown("**Recommendations & Explanations (Top 5)**")
+    show5 = sd_df.head(5).copy()
+    for _, r in show5.iterrows():
+        msid = int(r["MSID"]) if pd.notna(r["MSID"]) else -1
+        with st.expander(f"Why this recommendation? — [{msid}] {str(r['Title'])[:90]}"):
+            best_pos = float(r["Best Avg Position"])
+            impressions = int(float(r["Total Impressions"]))
 
-        ctr_gain = st.slider(
-            f"CTR improvement (%) for MSID {msid}",
-            min_value=1, max_value=20, value=5, key=f"sd_ctr_{msid}"
-        )
-        delta_clicks = what_if_ctr_gain(impressions, expected_ctr_from_rank(best_pos), ctr_gain)
-        st.write(f"- Estimated extra clicks: **{int(delta_clicks):,}**")
-    else:
-        for e in (err or []): st.info(e)
+            st.write(f"- **Best Avg Position**: {best_pos:.1f}")
+            st.write(f"- **Impressions**: {impressions:,}")
+
+            rank_round = int(round(best_pos))
+            site_avg_ctr = EXPECTED_CTR.get(rank_round, 0.03)
+            st.write(f"- **Site Avg CTR by rank**: {site_avg_ctr:.2%}")
+
+            ctr_gain = st.slider(
+                f"CTR improvement (%) for MSID {msid}",
+                min_value=1, max_value=20, value=5, key=f"sd_ctr_{msid}"
+            )
+            delta_clicks = what_if_ctr_gain(impressions, expected_ctr_from_rank(best_pos), ctr_gain)
+            st.write(f"- Estimated extra clicks: **{int(delta_clicks):,}**")
+else:
+    for e in (sd_errs or []):
+        st.info(e)
+
 st.divider()
 
 # 2) Low CTR
 st.subheader("Module 2: Low CTR Opportunities")
+
+low_errs: List[str] = []
+low_df = pd.DataFrame()
 out2 = run_module_safely("Low CTR", find_low_ctr_opportunities, filtered_df)
 if out2 is not None:
-    err, low_df = out2
-    if not low_df.empty:
-        t10 = low_df.head(10).copy()
-        t10['Best Avg Position'] = t10['Best Avg Position'].map('{:.1f}'.format)
-        t10['CTR'] = t10['CTR'].map('{:.2%}'.format)
-        t10['Expected CTR'] = t10['Expected CTR'].map('{:.2%}'.format)
-        t10['CTR Deficit'] = t10['CTR Deficit'].map('{:.2%}'.format)
-        t10['Total Impressions'] = t10['Total Impressions'].map('{:,.0f}'.format)
-        st.dataframe(t10, use_container_width=True, hide_index=True)
-        st.download_button(label=f"Download All ({len(low_df)})", data=low_df.to_csv(index=False),
-                           file_name=f"low_ctr_{pd.Timestamp.now().strftime('%Y%m%d')}.csv")
-        st.markdown("**Why these items? (Explainable AI)**")
-        for _, row in low_df.head(5).iterrows():
-            with st.expander(f"Why this? — [{int(row['MSID'])}] {row['Title'][:90]}"):
-                st.write(f"- **Position**: {row['Best Avg Position']:.1f}, **CTR**: {row['CTR']:.2%}, **Expected**: {row['Expected CTR']:.2%}")
-                st.write(f"- **Deficit**: {row['CTR Deficit']:.2%}, **Impressions**: {int(row['Total Impressions']):,}")
-                conf = min(0.98, 0.4 + (float(row['CTR Deficit'])*100)/10.0)
-                st.write(f"- **Confidence**: {conf:.2f}")
-                ctr_add = st.slider(f"CTR lift (%) for MSID {int(row['MSID'])}", 1, 20, 5, key=f"low_ctr_{int(row['MSID'])}")
-                delta_clicks = what_if_ctr_gain(float(row['Total Impressions']), float(str(row['CTR']).replace('%','')) if isinstance(row['CTR'], str) else float(row['CTR']), ctr_add)
-                st.write(f"- Extra clicks if CTR +{ctr_add}%: **{int(what_if_ctr_gain(float(str(row['Total Impressions']).replace(',','')), float(str(row['CTR']).replace('%','')) if isinstance(row['CTR'], str) else float(row['CTR']), ctr_add)):,}**")
-    else:
-        for e in (err or []): st.info(e)
-st.divider()
+    low_errs, low_df = out2
 
+if low_df is not None and not low_df.empty:
+    t10 = low_df.head(10).copy()
+    t10['Best Avg Position'] = t10['Best Avg Position'].map('{:.1f}'.format)
+    t10['CTR'] = t10['CTR'].map('{:.2%}'.format)
+    t10['Expected CTR'] = t10['Expected CTR'].map('{:.2%}'.format)
+    t10['CTR Deficit'] = t10['CTR Deficit'].map('{:.2%}'.format)
+    t10['Total Impressions'] = t10['Total Impressions'].map('{:,.0f}'.format)
+    st.dataframe(t10, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        label=f"Download All ({len(low_df)})",
+        data=low_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"low_ctr_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
+
+    st.markdown("**Why these items? (Explainable AI)**")
+    for _, row in low_df.head(5).iterrows():
+        msid_i = int(row['MSID']) if pd.notna(row['MSID']) else -1
+        with st.expander(f"Why this? — [{msid_i}] {str(row['Title'])[:90]}"):
+            pos_val = float(row['Best Avg Position'])
+            ctr_val = float(str(row['CTR']).replace('%',''))/100.0 if isinstance(row['CTR'], str) else float(row['CTR'])
+            exp_ctr = float(row['Expected CTR'])
+            deficit = float(row['CTR Deficit'])
+            imps = int(float(row['Total Impressions']))
+
+            st.write(f"- **Position**: {pos_val:.1f}, **CTR**: {ctr_val:.2%}, **Expected**: {exp_ctr:.2%}")
+            st.write(f"- **Deficit**: {deficit:.2%}, **Impressions**: {imps:,}")
+
+            conf = min(0.98, 0.4 + (deficit*100)/10.0)
+            st.write(f"- **Confidence**: {conf:.2f}")
+
+            ctr_add = st.slider(
+                f"CTR lift (%) for MSID {msid_i}",
+                min_value=1, max_value=20, value=5, key=f"low_ctr_{msid_i}"
+            )
+            extra_clicks = what_if_ctr_gain(imps, ctr_val, ctr_add)
+            st.write(f"- Extra clicks if CTR +{ctr_add}%: **{int(extra_clicks):,}**")
+else:
+    for e in (low_errs or []):
+        st.info(e)
+
+st.divider()
 # 3) Cannibalization
 st.subheader("Module 3: Content Cannibalization — English SEO Titles")
 with st.spinner("Clustering SEO titles & computing semantic similarity..."):
@@ -1284,6 +1317,7 @@ st.download_button("Download Executive Summary (JSON)", data=summary_json.encode
                    file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
 
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
+
 
 
 
