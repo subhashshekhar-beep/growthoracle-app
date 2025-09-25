@@ -923,50 +923,102 @@ def english_cannibalization(df):
 # --- Module 4: Engagement vs Search Mismatch ---
 def engagement_mismatches(df):
     d = df.copy()
-    engagement_duration_col = next((c for c in ["userEngagementDuration","engagement_duration"] if c in d.columns), None)
-    bounce_rate_col = next((c for c in ["bounceRate","bounce_rate"] if c in d.columns), None)
+
+    # Try to locate columns
+    dur_col = next((c for c in ["userEngagementDuration","engagement_duration"] if c in d.columns), None)
+    br_col  = next((c for c in ["bounceRate","bounce_rate"] if c in d.columns), None)
     clicks_col = next((c for c in ["Clicks","gsc_clicks"] if c in d.columns), None)
-    position_col = next((c for c in ["Position","gsc_avg_position"] if c in d.columns), None)
+    pos_col = next((c for c in ["Position","gsc_avg_position"] if c in d.columns), None)
     title_col = next((c for c in ["Title","title","headline"] if c in d.columns), "Title")
-    if not all([engagement_duration_col, bounce_rate_col, clicks_col, position_col]):
-        return ["**Engagement Mismatch analysis unavailable** — missing required columns."]
-    for c in [engagement_duration_col, bounce_rate_col, clicks_col, position_col]:
-        d[c] = pd.to_numeric(d[c], errors="coerce")
-    d.dropna(subset=[engagement_duration_col, bounce_rate_col, position_col], inplace=True)
-    d = d[d[position_col] <= 50].copy()
-    if d.empty: return ["No articles with complete data for mismatch analysis."]
-    d["engagement_score"] = (d[engagement_duration_col].rank(pct=True) + (1 - d[bounce_rate_col].rank(pct=True))) / 2
-    d["search_score"] = (d[clicks_col].rank(pct=True) + (1 - d[position_col].rank(pct=True))) / 2
-    d["mismatch_score"] = (d["engagement_score"] - d["search_score"])
-    d["mismatch_type"] = np.where((d["engagement_score"] > 0.8) & (d["search_score"] < 0.2), "Hidden Gem",
-                           np.where((d["search_score"] > 0.8) & (d["engagement_score"] < 0.2), "Clickbait Risk", None))
+
+    # Fallbacks for clicks/search signal
+    if not clicks_col:
+        if "Impressions" in d.columns and "CTR" in d.columns:
+            d["__ClicksProxy"] = pd.to_numeric(d.get("Impressions"), errors="coerce") * pd.to_numeric(d.get("CTR"), errors="coerce")
+            clicks_col = "__ClicksProxy"
+        elif "screenPageViews" in d.columns:
+            clicks_col = "screenPageViews"
+        elif "totalUsers" in d.columns:
+            clicks_col = "totalUsers"
+
+    # Need at least one engagement metric
+    if not dur_col and not br_col:
+        return ["**Engagement Mismatch** needs engagement metrics (duration or bounce). None found."]
+
+    # Need at least one search signal
+    if not clicks_col and not pos_col:
+        return ["**Engagement Mismatch** needs a search signal (Clicks/Impressions×CTR/Pageviews/Users) or Position. None found."]
+
+    # Coerce numerics
+    for c in [dur_col, br_col, clicks_col, pos_col]:
+        if c: d[c] = pd.to_numeric(d[c], errors="coerce")
+
+    # Filter on position if present (cap outliers)
+    if pos_col:
+        d = d[(d[pos_col].isna()) | (d[pos_col].between(1, 50, inclusive="both"))].copy()
+
+    # Drop rows missing the required pieces (but allow partial fallbacks)
+    req_for_row = [c for c in [clicks_col, dur_col, br_col] if c]
+    d = d.dropna(subset=req_for_row)
+    if d.empty:
+        return ["No articles with complete data for mismatch analysis."]
+
+    # Build engagement score
+    parts_e = []
+    if dur_col: parts_e.append(d[dur_col].rank(pct=True))
+    if br_col:  parts_e.append(1 - d[br_col].rank(pct=True))
+    d["engagement_score"] = np.mean(parts_e, axis=0) if len(parts_e) > 1 else parts_e[0]
+
+    # Build search score
+    parts_s = []
+    if clicks_col: parts_s.append(d[clicks_col].rank(pct=True))
+    if pos_col:    parts_s.append(1 - d[pos_col].rank(pct=True))
+    d["search_score"] = np.mean(parts_s, axis=0) if len(parts_s) > 1 else parts_s[0]
+
+    d["mismatch_score"] = d["engagement_score"] - d["search_score"]
+    d["mismatch_type"] = np.where(
+        (d["engagement_score"] > 0.8) & (d["search_score"] < 0.2), "Hidden Gem",
+        np.where((d["search_score"] > 0.8) & (d["engagement_score"] < 0.2), "Clickbait Risk", None)
+    )
+
+    # Sort by absolute mismatch (Streamlit-safe)
     mismatches = (
-    d.dropna(subset=["mismatch_type"])
-     .sort_values(by="mismatch_score", key=np.abs, ascending=False)
-     .head(8)
-)
-    cards=[]
+        d.dropna(subset=["mismatch_type"])
+         .sort_values(by="mismatch_score", key=np.abs, ascending=False)
+         .head(8)
+    )
+    if mismatches.empty:
+        return ["No significant mismatches detected."]
+
+    cards = []
     for _, row in mismatches.iterrows():
         emoji = "💎" if row["mismatch_type"]=="Hidden Gem" else "⚠️"
-        recs = (["- **SEO Optimization:** Expand title/H1 & match intent.","- **Internal Linking:** Add links from high-authority pages.","- **Content Expansion:** Add related sections."]
-                if row["mismatch_type"]=="Hidden Gem" else
-                ["- **Content Depth:** Address thin content.","- **UX:** Improve speed & mobile.","- **Title Alignment:** Ensure promise matches content."])
-        goal = (f"_Goal: Leverage high engagement to improve search visibility from position {row[position_col]:.1f}._"
-                if row["mismatch_type"]=="Hidden Gem" else f"_Goal: Improve user experience to match search performance (clicks: {int(row[clicks_col]):,})._")
-        with st.expander(f"Why this recommendation? — {emoji} {row.get(title_col,'Untitled')[:90]}", expanded=False):
+        recs = ([
+            "- **SEO Optimization:** Expand title/H1 & match intent.",
+            "- **Internal Linking:** Add links from high-authority pages.",
+            "- **Content Expansion:** Add related sections."
+        ] if row["mismatch_type"]=="Hidden Gem" else [
+            "- **Content Depth:** Address thin content.",
+            "- **UX:** Improve speed & mobile.",
+            "- **Title Alignment:** Ensure promise matches content."
+        ])
+        goal = (f"_Goal: Leverage high engagement to improve search visibility{'' if not pos_col else f' from position {row[pos_col]:.1f}'}._"
+                if row["mismatch_type"]=="Hidden Gem"
+                else f"_Goal: Improve user experience to match search performance{'' if clicks_col is None else f' (clicks signal present).'}_")
+        with st.expander(f"Why this recommendation? — {emoji} {str(row.get(title_col, 'Untitled'))[:90]}", expanded=False):
             st.write(f"- **Engagement Score**: {row['engagement_score']:.2f}, **Search Score**: {row['search_score']:.2f}")
-            st.write(f"- **Duration**: {row[engagement_duration_col]:.1f}s, **Bounce**: {row[bounce_rate_col]:.1%}, **Pos**: {row[position_col]:.1f}")
-            st.write(f"- **Confidence**: {min(0.95, 0.5+abs(row['mismatch_score'])*0.8):.2f}")
+            if dur_col: st.write(f"- **Duration**: {row[dur_col]:.1f}s")
+            if br_col:  st.write(f"- **Bounce**: {row[br_col]:.1%}")
+            if pos_col: st.write(f"- **Pos**: {row[pos_col]:.1f}")
+            conf = min(0.95, 0.5 + abs(row['mismatch_score'])*0.8)
+            st.write(f"- **Confidence**: {conf:.2f}")
         cards.append(
             f"### {emoji} {row['mismatch_type']}\n"
             f"**MSID:** `{row.get('msid', '—')}`\n"
             f"**Title:** {row.get(title_col,'Untitled')}\n"
             f"**Engagement Score:** **{row['engagement_score']:.2f}** | **Search Score:** **{row['search_score']:.2f}**\n"
-            f"**Metrics:** Duration: **{row[engagement_duration_col]:.1f}s** | Bounce: **{row[bounce_rate_col]:.1%}** | Pos: **{row[position_col]:.1f}**\n\n"
-            f"**Recommendations:**\n" + "\n".join(recs) + f"\n\n{goal}"
         )
-    return cards if cards else ["No significant mismatches detected."]
-
+    return cards
 # --- Charts & helpers ---
 def export_plot_html(fig, name):
     if to_html is None:
@@ -1250,7 +1302,9 @@ st.divider()
 
 # 5) Category Performance
 st.subheader("Module 5: Category Performance")
-cat_df = run_module_safely("Category Performance", analyze_category_performance, filtered_df) or pd.DataFrame()
+cat_df = run_module_safely("Category Performance", analyze_category_performance, filtered_df)
+if not isinstance(cat_df, pd.DataFrame):
+    cat_df = pd.DataFrame()
 if cat_df.empty or ("error" in cat_df.columns):
     st.info("Category Performance could not be computed.")
 else:
@@ -1317,6 +1371,7 @@ st.download_button("Download Executive Summary (JSON)", data=summary_json.encode
                    file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
 
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
+
 
 
 
