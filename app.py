@@ -242,15 +242,15 @@ def _guess_colmap(prod_df, ga4_df, gsc_df):
         "bounce":"bounceRate" if "bounceRate" in ga4_df.columns else next((c for c in ga4_df.columns if "bounce" in c.lower()), None),
     }
     gsc_map = {
-        "date":"Date" if "Date" in gsc_df.columns else next((c for c in gsc_df.columns if c.lower()=="date"), None),
-        "page":"Page" if "Page" in gsc_df.columns else next((c for c in gsc_df.columns if "page" in c.lower()), None),
-        "query":"Query" if "Query" in gsc_df.columns else next((c for c in gsc_df.columns if "query" in c.lower()), None),
-        "impr":"Impressions" if "Impressions" in gsc_df.columns else next((c for c in gsc_df.columns if "impr" in c.lower()), None),
-        "ctr":"CTR" if "CTR" in gsc_df.columns else next((c for c in gsc_df.columns if "ctr" in c.lower()), None),
-        "pos":"Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
-        "clicks": "Clicks" if "Clicks" in gsc_df.columns else next((c for c in gsc_df.columns if "click" in c.lower()), None), # ADD THIS LINE
-    "pos":"Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
-    }
+    "date":  "Date" if "Date" in gsc_df.columns else next((c for c in gsc_df.columns if c.lower()=="date"), None),
+    "page":  "Page" if "Page" in gsc_df.columns else next((c for c in gsc_df.columns if "page" in c.lower()), None),
+    "query": "Query" if "Query" in gsc_df.columns else next((c for c in gsc_df.columns if "query" in c.lower()), None),
+    "clicks":"Clicks" if "Clicks" in gsc_df.columns else next((c for c in gsc_df.columns if "click" in c.lower()), None),
+    "impr":  "Impressions" if "Impressions" in gsc_df.columns else next((c for c in gsc_df.columns if "impr" in c.lower()), None),
+    "ctr":   "CTR" if "CTR" in gsc_df.columns else next((c for c in gsc_df.columns if "ctr" in c.lower()), None),
+    "pos":   "Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
+}
+
     return prod_map, ga4_map, gsc_map
 
 def guess_colmap_enhanced(prod_df, ga4_df, gsc_df):
@@ -543,15 +543,24 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
     if ga4_map.get("bounce") in ga4_df.columns:    ga4_df.rename(columns={ga4_map["bounce"]: "bounceRate"}, inplace=True)
 
     # Inside process_uploaded_files
-gsc_ren = {
-    gsc_map["date"]: "date", gsc_map["page"]: "page_url", gsc_map["query"]: "Query",
-    gsc_map["clicks"]: "Clicks", # ADD THIS LINE
-    gsc_map["impr"]: "Impressions", gsc_map.get("ctr","CTR"): "CTR", gsc_map["pos"]: "Position"}
+    # GSC rename map
+    required_map_keys = ["date", "page", "query", "impr", "pos"]  # 'clicks' & 'ctr' are nice-to-have
+    for key in required_map_keys:
+        if not gsc_map.get(key) or gsc_map[key] not in gsc_df.columns:
+            vc.add("Critical","MISSING_COL",f"GSC missing required column for '{key}'", want=gsc_map.get(key))
+            return None, vc
 
-    for k in list(gsc_ren.keys()):
-        if k not in gsc_df.columns:
-            vc.add("Critical","MISSING_COL",f"GSC missing required column '{k}'"); return None, vc
+    gsc_ren = {}
+    if gsc_map.get("date"):   gsc_ren[gsc_map["date"]]   = "date"
+    if gsc_map.get("page"):   gsc_ren[gsc_map["page"]]   = "page_url"
+    if gsc_map.get("query"):  gsc_ren[gsc_map["query"]]  = "Query"
+    if gsc_map.get("clicks"): gsc_ren[gsc_map["clicks"]] = "Clicks"
+    if gsc_map.get("impr"):   gsc_ren[gsc_map["impr"]]   = "Impressions"
+    if gsc_map.get("ctr"):    gsc_ren[gsc_map["ctr"]]    = "CTR"
+    if gsc_map.get("pos"):    gsc_ren[gsc_map["pos"]]    = "Position"
+
     gsc_df.rename(columns=gsc_ren, inplace=True)
+
 
     # Early date standardization
     prod_df, ga4_df, gsc_df = standardize_dates_early(prod_df, ga4_df, gsc_df,
@@ -812,67 +821,103 @@ def english_cannibalization(df):
     d = df.copy()
     if "Title" not in d.columns or "msid" not in d.columns:
         return ["Analysis unavailable: missing Title or msid."], pd.DataFrame(), pd.DataFrame()
+
     d["SEO_Title"] = d["Title"].astype(str).fillna("")
-    articles = d.groupby("msid").agg(SEO_Title=("SEO_Title","first"), Title=("Title","first"), L2_Category=("L2_Category","first"),
-                                     Impressions=("Impressions","sum"), CTR=("CTR","mean"), Position=("Position","mean")).reset_index()
+    articles = (
+        d.groupby("msid")
+         .agg(SEO_Title=("SEO_Title","first"),
+              Title=("Title","first"),
+              L2_Category=("L2_Category","first") if "L2_Category" in d.columns else ("L2_Category", lambda x: "Uncategorized"),
+              Impressions=("Impressions","sum") if "Impressions" in d.columns else ("Impressions", lambda x: 0),
+              CTR=("CTR","mean") if "CTR" in d.columns else ("CTR", lambda x: np.nan),
+              Position=("Position","mean") if "Position" in d.columns else ("Position", lambda x: np.nan))
+         .reset_index()
+    )
+    if "L2_Category" not in articles.columns:
+        articles["L2_Category"] = "Uncategorized"
+
+    # Try sentence-transformers; fall back to TF-IDF cosine
     st_model = load_sentence_transformer()
+    emb = None
     if st_model is not None:
         try:
-            emb = st_model.encode(articles["SEO_Title"].tolist(), batch_size=64, show_progress_bar=False, normalize_embeddings=True)
-            sim = (emb @ emb.T)
+            emb = st_model.encode(
+                articles["SEO_Title"].tolist(),
+                batch_size=64,
+                show_progress_bar=False,
+                normalize_embeddings=True
+            )
+            sim = emb @ emb.T
         except Exception as e:
             logger.warning(f"ST encoding failed, falling back TF-IDF: {e}")
-            emb=None
-    else:
-        emb=None
+            emb = None
+
     Xtfidf, vec = _tfidf_embed(articles["SEO_Title"].tolist())
     vocab = np.array(vec.get_feature_names_out())
     tfidf_mat = Xtfidf
     if emb is None:
         sim = _cosine_sim_matrix(tfidf_mat)
+
     labels = _cluster_by_threshold(sim, threshold=TH["similarity_threshold"])
-    # ... inside english_cannibalization after labels are calculated
-articles["similarity_group"] = labels
-cann = articles[articles["similarity_group"] != -1].copy()
-if cann.empty: return ["No competing content clusters found at current threshold."], pd.DataFrame(), pd.DataFrame()
-topk_list = [_extract_keywords_topk(tfidf_mat[i], vocab, k=6) for i in range(tfidf_mat.shape[0])]
-articles["top_keywords"] = topk_list
+    articles["similarity_group"] = labels
 
-# OLD problematic merge
-# detailed = cann.merge(d[["msid","Title","L2_Category","Impressions","CTR","Position","Publish Time"]],
-#                      on=["msid","Title","L2_Category"], how="left")
+    cann = articles[articles["similarity_group"] != -1].copy()
+    if cann.empty:
+        return ["No competing content clusters found at current threshold."], pd.DataFrame(), pd.DataFrame()
 
-# NEW safer merge
-detailed = articles[articles["similarity_group"] != -1].copy()
-detailed.rename(columns={"msid":"MSID"}, inplace=True)
-    theme_rows=[]
-    for gid, sub in articles[articles["similarity_group"]!=-1].groupby("similarity_group"):
+    # Top keywords per title
+    topk_list = [_extract_keywords_topk(tfidf_mat[i], vocab, k=6) for i in range(tfidf_mat.shape[0])]
+    articles["top_keywords"] = topk_list
+
+    detailed = articles[articles["similarity_group"] != -1].copy()
+    detailed.rename(columns={"msid": "MSID"}, inplace=True)
+
+    # Group theme and confidence
+    theme_rows = []
+    group_conf = []
+    for gid, sub in articles[articles["similarity_group"] != -1].groupby("similarity_group"):
+        # Theme
         tokens = " ".join(sub["SEO_Title"].tolist()).lower().split()
-        tok_series = pd.Series([t for t in tokens if len(t)>3])
+        tok_series = pd.Series([t for t in tokens if len(t) > 3])
         theme = ", ".join(tok_series.value_counts().head(5).index.tolist())
         theme_rows.append({"similarity_group": gid, "Theme": theme})
-    theme_df = pd.DataFrame(theme_rows)
-    detailed = detailed.merge(theme_df, on="similarity_group", how="left")
-    summary = (detailed.groupby("L2_Category").agg(Cannibalization_Count=("MSID","nunique")).reset_index().sort_values("Cannibalization_Count", ascending=False))
-    group_conf=[]
-    for gid, sub in articles[articles["similarity_group"]!=-1].groupby("similarity_group"):
+
+        # Confidence from pairwise similarity + keyword overlap
         idxs = sub.index.tolist()
-        if len(idxs) < 2: continue
-        pairs=[]
+        pairs = []
         for i in range(len(idxs)):
-            for j in range(i+1,len(idxs)):
+            for j in range(i + 1, len(idxs)):
                 si, sj = idxs[i], idxs[j]
-                sim_ij = sim[si,sj]
-                ko = _keyword_overlap(articles.loc[si,"top_keywords"], articles.loc[sj,"top_keywords"])
+                sim_ij = float(sim[si, sj])
+                ko = _keyword_overlap(articles.loc[si, "top_keywords"], articles.loc[sj, "top_keywords"])
                 pairs.append((sim_ij, ko))
-        sim_mean = float(np.mean([p[0] for p in pairs])) if pairs else 0.0
-        ko_mean  = float(np.mean([p[1] for p in pairs])) if pairs else 0.0
-        conf = 0.7*sim_mean + 0.3*ko_mean
-        group_conf.append({"similarity_group": gid, "Cluster Confidence": round(conf,3)})
+        if pairs:
+            sim_mean = float(np.mean([p[0] for p in pairs]))
+            ko_mean = float(np.mean([p[1] for p in pairs]))
+            conf = 0.7 * sim_mean + 0.3 * ko_mean
+        else:
+            conf = 0.0
+        group_conf.append({"similarity_group": gid, "Cluster Confidence": round(conf, 3)})
+
+    theme_df = pd.DataFrame(theme_rows)
     group_conf_df = pd.DataFrame(group_conf)
-    detailed = detailed.merge(group_conf_df, on="similarity_group", how="left")
-    keep = ["MSID","Title","L2_Category","Theme","Position","CTR","Impressions","Publish Time","similarity_group","Cluster Confidence"]
+    detailed = detailed.merge(theme_df, on="similarity_group", how="left").merge(group_conf_df, on="similarity_group", how="left")
+
+    # Keep only useful columns; enrich with Publish Time if present in d
+    keep = ["MSID", "Title", "L2_Category", "Theme", "Position", "CTR", "Impressions", "similarity_group", "Cluster Confidence"]
+    if "Publish Time" in d.columns:
+        detailed = detailed.merge(d[["msid", "Publish Time"]].drop_duplicates().rename(columns={"msid": "MSID"}), on="MSID", how="left")
+        keep.append("Publish Time")
+
     detailed = detailed[keep].drop_duplicates()
+
+    # High-level category summary
+    summary = (
+        detailed.groupby("L2_Category")
+                .agg(Cannibalization_Count=("MSID", "nunique"))
+                .reset_index()
+                .sort_values("Cannibalization_Count", ascending=False)
+    )
     return [], summary, detailed
 
 # --- Module 4: Engagement vs Search Mismatch ---
@@ -895,7 +940,11 @@ def engagement_mismatches(df):
     d["mismatch_score"] = (d["engagement_score"] - d["search_score"])
     d["mismatch_type"] = np.where((d["engagement_score"] > 0.8) & (d["search_score"] < 0.2), "Hidden Gem",
                            np.where((d["search_score"] > 0.8) & (d["engagement_score"] < 0.2), "Clickbait Risk", None))
-    mismatches = d.dropna(subset=["mismatch_type"]).sort_values(by=abs(d["mismatch_score"]), ascending=False).head(8)
+    mismatches = (
+    d.dropna(subset=["mismatch_type"])
+     .sort_values(by="mismatch_score", key=np.abs, ascending=False)
+     .head(8)
+)
     cards=[]
     for _, row in mismatches.iterrows():
         emoji = "💎" if row["mismatch_type"]=="Hidden Gem" else "⚠️"
@@ -1071,7 +1120,7 @@ if out is not None:
         st.markdown("**Recommendations & Explanations (Top 5)**")
         show5 = sd_df.head(5)
         for _, r in show5.iterrows():
-            msid = r["MSID"]
+           msid = r["MSID"]
                 with st.expander(f"Why this recommendation? — [{msid}] {r['Title'][:90]}"):
                 st.write(f"- **Best Avg Position**: {r['Best Avg Position']:.1f}")
                 st.write(f"- **Impressions**: {int(float(r['Total Impressions'])):,}") # Corrected line
@@ -1224,4 +1273,5 @@ st.download_button("Download Executive Summary (JSON)", data=summary_json.encode
                    file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
 
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
+
 
