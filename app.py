@@ -66,7 +66,7 @@ _DEFAULT_CONFIG = {
     "presets": {
         "Conservative": {"striking_distance_min": 15, "striking_distance_max": 25, "ctr_deficit_pct": 2.0, "similarity_threshold": 0.7, "min_impressions": 300, "min_clicks": 30},
         "Standard":     {"striking_distance_min": 11, "striking_distance_max": 20, "ctr_deficit_pct": 1.0, "similarity_threshold": 0.6, "min_impressions": 100, "min_clicks": 10},
-        "Aggressive":   {"striking_distance_min": 8,  "striking_distance_max": 18, "ctr_deficit_pct": 0.5,"similarity_threshold": 0.5, "min_impressions": 50,  "min_clicks": 5}
+        "Aggressive":   {"striking_distance_min": 8,  "striking_distance_max": 18, "ctr_deficit_pct": 0.5, "similarity_threshold": 0.5, "min_impressions": 50,  "min_clicks": 5}
     },
     "expected_ctr_by_rank": {1: 0.28, 2: 0.15, 3: 0.11, 4: 0.08, 5: 0.07, 6: 0.05, 7: 0.045, 8: 0.038, 9: 0.032},
     "performance": {"sample_row_limit": 350_000, "seed": 42},
@@ -242,15 +242,13 @@ def _guess_colmap(prod_df, ga4_df, gsc_df):
         "bounce":"bounceRate" if "bounceRate" in ga4_df.columns else next((c for c in ga4_df.columns if "bounce" in c.lower()), None),
     }
     gsc_map = {
-    "date":  "Date" if "Date" in gsc_df.columns else next((c for c in gsc_df.columns if c.lower()=="date"), None),
-    "page":  "Page" if "Page" in gsc_df.columns else next((c for c in gsc_df.columns if "page" in c.lower()), None),
-    "query": "Query" if "Query" in gsc_df.columns else next((c for c in gsc_df.columns if "query" in c.lower()), None),
-    "clicks":"Clicks" if "Clicks" in gsc_df.columns else next((c for c in gsc_df.columns if "click" in c.lower()), None),
-    "impr":  "Impressions" if "Impressions" in gsc_df.columns else next((c for c in gsc_df.columns if "impr" in c.lower()), None),
-    "ctr":   "CTR" if "CTR" in gsc_df.columns else next((c for c in gsc_df.columns if "ctr" in c.lower()), None),
-    "pos":   "Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
-}
-
+        "date":"Date" if "Date" in gsc_df.columns else next((c for c in gsc_df.columns if c.lower()=="date"), None),
+        "page":"Page" if "Page" in gsc_df.columns else next((c for c in gsc_df.columns if "page" in c.lower()), None),
+        "query":"Query" if "Query" in gsc_df.columns else next((c for c in gsc_df.columns if "query" in c.lower()), None),
+        "impr":"Impressions" if "Impressions" in gsc_df.columns else next((c for c in gsc_df.columns if "impr" in c.lower()), None),
+        "ctr":"CTR" if "CTR" in gsc_df.columns else next((c for c in gsc_df.columns if "ctr" in c.lower()), None),
+        "pos":"Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
+    }
     return prod_map, ga4_map, gsc_map
 
 def guess_colmap_enhanced(prod_df, ga4_df, gsc_df):
@@ -264,7 +262,6 @@ def guess_colmap_enhanced(prod_df, ga4_df, gsc_df):
         for c in detect_date_cols(gsc_df):
             if c.lower()=="date": gsc_map["date"]=c; break
     return prod_map, ga4_map, gsc_map
-    
 
 def validate_columns_presence(prod_map, ga4_map, gsc_map, vc: ValidationCollector):
     req_prod = ["msid"]; req_ga4 = ["msid"]; req_gsc = ["date","page","query","impr","pos"]
@@ -282,27 +279,24 @@ def standardize_dates_early(prod_df, ga4_df, gsc_df, mappings, vc: ValidationCol
     def _ensure_utc(ts: pd.Timestamp) -> pd.Timestamp:
         if pd.isna(ts):
             return ts
-        # If tz-aware, convert; if tz-naive, localize.
         try:
             return ts.tz_convert("UTC")
         except Exception:
             try:
                 return ts.tz_localize("UTC")
             except Exception:
-                return ts  # last resort
+                return ts
 
     def normalize_date_only(df, col_name, out_name):
         if col_name in df.columns:
-            dt = safe_dt_parse(df[col_name], col_name, vc)  # tz-aware UTC from safe_dt_parse
+            dt = safe_dt_parse(df[col_name], col_name, vc)
             df[out_name] = dt.dt.date
             if dt.notna().any():
                 maxd, mind = dt.max(), dt.min()
                 maxd_utc, mind_utc = _ensure_utc(maxd), _ensure_utc(mind)
-                now_utc = pd.Timestamp.now(tz="UTC")  # ✅ tz-aware current time
-
+                now_utc = pd.Timestamp.now(tz="UTC")
                 if (pd.notna(maxd_utc)) and (maxd_utc > now_utc + pd.Timedelta(days=1)):
                     vc.add("Warning", "FUTURE_DATE", f"{out_name} has future dates", sample=str(maxd_utc))
-
                 if (pd.notna(mind_utc)) and (mind_utc < pd.Timestamp(2020, 1, 1, tz="UTC")):
                     vc.add("Info", "OLD_DATE", f"{out_name} includes <2020 dates", earliest=str(mind_utc))
 
@@ -327,8 +321,6 @@ def standardize_dates_early(prod_df, ga4_df, gsc_df, mappings, vc: ValidationCol
         normalize_date_only(gs, gs_date_col, "date")
 
     return p, g4, gs
-
-
 
 # ---- Session defaults + sidebar ----
 def init_state_defaults():
@@ -441,18 +433,15 @@ if step == "2) Upload & Map Columns":
         ga4_map["bounce"]    = st.selectbox("Bounce Rate", ga4_df_raw.columns, index=max(0, ga4_df_raw.columns.get_loc(ga4_map_guess.get("bounce","")) ) if ga4_map_guess.get("bounce") in ga4_df_raw.columns else 0)
 
     with st.expander("GSC Mapping", expanded=True):
-        c1, c2, c3 = st.columns(3)
-        c4, c5, c6, c7 = st.columns(4)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         gsc_map = {}
-        gsc_map["date"]   = c1.selectbox("Date", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("date","")) ) if gsc_map_guess.get("date") in gsc_df_raw.columns else 0)
-        gsc_map["page"]   = c2.selectbox("Page URL", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("page","")) ) if gsc_map_guess.get("page") in gsc_df_raw.columns else 0)
-        gsc_map["query"]  = c3.selectbox("Query", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("query","")) ) if gsc_map_guess.get("query") in gsc_df_raw.columns else 0)
-        gsc_map["clicks"] = c4.selectbox("Clicks", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("clicks","")) ) if gsc_map_guess.get("clicks") in gsc_df_raw.columns else 0)
-        gsc_map["impr"]   = c5.selectbox("Impressions", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("impr","")) ) if gsc_map_guess.get("impr") in gsc_df_raw.columns else 0)
-        gsc_map["ctr"]    = c6.selectbox("CTR", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("ctr","")) ) if gsc_map_guess.get("ctr") in gsc_df_raw.columns else 0)
-        gsc_map["pos"]    = c7.selectbox("Position", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("pos","")) ) if gsc_map_guess.get("pos") in gsc_df_raw.columns else 0)
+        gsc_map["date"] = c1.selectbox("Date", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("date","")) ) if gsc_map_guess.get("date") in gsc_df_raw.columns else 0)
+        gsc_map["page"] = c2.selectbox("Page URL", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("page","")) ) if gsc_map_guess.get("page") in gsc_df_raw.columns else 0)
+        gsc_map["query"]= c3.selectbox("Query", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("query","")) ) if gsc_map_guess.get("query") in gsc_df_raw.columns else 0)
+        gsc_map["impr"] = c4.selectbox("Impressions", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("impr","")) ) if gsc_map_guess.get("impr") in gsc_df_raw.columns else 0)
+        gsc_map["ctr"]  = c5.selectbox("CTR", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("ctr","")) ) if gsc_map_guess.get("ctr") in gsc_df_raw.columns else 0)
+        gsc_map["pos"]  = c6.selectbox("Position", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("pos","")) ) if gsc_map_guess.get("pos") in gsc_df_raw.columns else 0)
 
-    # quick validation
     _ = validate_columns_presence(prod_map, ga4_map, gsc_map, vc_read)
     rep_df = vc_read.to_dataframe()
     if not rep_df.empty:
@@ -509,7 +498,7 @@ else:
     st.download_button("Download Validation Report (CSV)", data=rep_df.to_csv(index=False).encode("utf-8"),
                        file_name=f"validation_report_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", mime="text/csv")
 
-# ---- Robust processing function (drop-in replacement) ----
+# ---- Robust processing function ----
 @st.cache_data(show_spinner=False)
 def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map,
                            vc_serialized: Optional[str]=None,
@@ -542,29 +531,18 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
     if ga4_map.get("engagement") in ga4_df.columns:ga4_df.rename(columns={ga4_map["engagement"]: "userEngagementDuration"}, inplace=True)
     if ga4_map.get("bounce") in ga4_df.columns:    ga4_df.rename(columns={ga4_map["bounce"]: "bounceRate"}, inplace=True)
 
-    # Inside process_uploaded_files
-    # GSC rename map
-    required_map_keys = ["date", "page", "query", "impr", "pos"]  # 'clicks' & 'ctr' are nice-to-have
-    for key in required_map_keys:
-        if not gsc_map.get(key) or gsc_map[key] not in gsc_df.columns:
-            vc.add("Critical","MISSING_COL",f"GSC missing required column for '{key}'", want=gsc_map.get(key))
-            return None, vc
-
-    gsc_ren = {}
-    if gsc_map.get("date"):   gsc_ren[gsc_map["date"]]   = "date"
-    if gsc_map.get("page"):   gsc_ren[gsc_map["page"]]   = "page_url"
-    if gsc_map.get("query"):  gsc_ren[gsc_map["query"]]  = "Query"
-    if gsc_map.get("clicks"): gsc_ren[gsc_map["clicks"]] = "Clicks"
-    if gsc_map.get("impr"):   gsc_ren[gsc_map["impr"]]   = "Impressions"
-    if gsc_map.get("ctr"):    gsc_ren[gsc_map["ctr"]]    = "CTR"
-    if gsc_map.get("pos"):    gsc_ren[gsc_map["pos"]]    = "Position"
-
+    gsc_ren = {
+        gsc_map["date"]: "date", gsc_map["page"]: "page_url", gsc_map["query"]: "Query",
+        gsc_map["impr"]: "Impressions", gsc_map.get("ctr","CTR"): "CTR", gsc_map["pos"]: "Position"
+    }
+    for k in list(gsc_ren.keys()):
+        if k not in gsc_df.columns:
+            vc.add("Critical","MISSING_COL",f"GSC missing required column '{k}'"); return None, vc
     gsc_df.rename(columns=gsc_ren, inplace=True)
-
 
     # Early date standardization
     prod_df, ga4_df, gsc_df = standardize_dates_early(prod_df, ga4_df, gsc_df,
-    {"prod": prod_map, "ga4": ga4_map, "gsc": gsc_map}, vc)
+                                                       {"prod": prod_map, "ga4": ga4_map, "gsc": gsc_map}, vc)
 
     # Types
     for df, col in [(prod_df,"msid"),(ga4_df,"msid")]:
@@ -713,14 +691,19 @@ if step == "3) Validate & Process":
     st.stop()
 
 # ============================
-# PART 4/5: Filters, Helpers, Core Insight Modules & Charts
-# ============================
-# Date filter
-# ============================
 # PART 4/5: Filters, Helpers, Core Insight Modules & Charts (UPDATED)
 # ============================
 
-# Date filter (unchanged)
+# Make sure we can safely run modules without crashing the app
+def run_module_safely(label: str, fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        st.warning(f"Module '{label}' encountered an issue and was skipped. Details: {type(e).__name__}: {e}")
+        logger.exception(f"[ModuleFail] {label}: {e}")
+        return None
+
+# --- Date filter
 def filter_by_date(df, start_date, end_date):
     if "date" not in df.columns: return df
     m = df.copy(); m["date"] = pd.to_datetime(m["date"], errors="coerce").dt.date
@@ -732,15 +715,23 @@ filtered_df = filter_by_date(master_df, *st.session_state.date_range)
 TH = st.session_state.thresholds
 EXPECTED_CTR = CONFIG["expected_ctr_by_rank"]
 
-# --- Module 1 & 2 & 3 (keep your existing working implementations) ---
+# --- Plotly HTML exporter
+def export_plot_html(fig, name):
+    if to_html is None:
+        st.info("Plotly HTML export not available in this environment."); return
+    html_str = to_html(fig, include_plotlyjs="cdn", full_html=True)
+    st.download_button("Export Chart (HTML)", data=html_str.encode("utf-8"),
+                       file_name=f"{name}.html", mime="text/html")
 
+# ============================
+# Module 4: Engagement vs Search Mismatch (ROBUST)
+# ============================
 
-# --- Module 4: Engagement vs Search Mismatch (ROBUST & FORGIVING) ---
 def _pick_col(d, candidates):
     return next((c for c in candidates if c in d.columns), None)
 
 def _build_clicks_proxy(d):
-    # Try useful fallbacks if Clicks is missing
+    # Fallbacks to create a click-like signal if Clicks is missing
     if "Impressions" in d.columns and "CTR" in d.columns:
         imp = pd.to_numeric(d["Impressions"], errors="coerce")
         ctr = pd.to_numeric(d["CTR"].astype(str).str.replace("%","", regex=False), errors="coerce")
@@ -766,11 +757,11 @@ def engagement_mismatches(df):
     if not dur_col and not br_col:
         return ["**Engagement Mismatch** needs engagement metrics (duration and/or bounce). None found."]
 
-    # Build click-like signal
+    # Build click-like signal if missing
     if not clicks_col:
         proxy = _build_clicks_proxy(d)
         if proxy is None and not pos_col:
-            return ["**Engagement Mismatch** needs a search signal (Clicks/Impressions×CTR/Pageviews/Users) or Position. None found."]
+            return ["**Engagement Mismatch** needs a search signal (Clicks/Impr×CTR/Pageviews/Users) or Position. None found."]
         if proxy is not None:
             d["__ClicksProxy"] = proxy
             clicks_col = "__ClicksProxy"
@@ -779,11 +770,11 @@ def engagement_mismatches(df):
     for c in [dur_col, br_col, clicks_col, pos_col]:
         if c: d[c] = pd.to_numeric(d[c], errors="coerce")
 
-    # Reasonable filter on position if present
+    # Reasonable position filter if present
     if pos_col:
         d = d[(d[pos_col].isna()) | (d[pos_col].between(1, 50, inclusive="both"))].copy()
 
-    # Build engagement score (rank-based, robust to missing one of dur/bounce)
+    # Engagement score (rank-based; use whatever we have)
     parts_e = []
     if dur_col: parts_e.append(d[dur_col].rank(pct=True))
     if br_col:  parts_e.append(1 - d[br_col].rank(pct=True))
@@ -791,10 +782,10 @@ def engagement_mismatches(df):
         return ["No usable engagement signals after cleaning."]
     d["engagement_score"] = np.mean(parts_e, axis=0) if len(parts_e) > 1 else parts_e[0]
 
-    # Build search score (click-like rank and optional position rank)
+    # Search score (click-like rank and/or position rank)
     parts_s = []
     if clicks_col: parts_s.append(d[clicks_col].rank(pct=True))
-    if pos_col:    parts_s.append(1 - d[pos_col].rank(pct=True))  # better (lower) position → higher score
+    if pos_col:    parts_s.append(1 - d[pos_col].rank(pct=True))  # better (lower) pos => higher score
     if not parts_s:
         return ["No usable search signals after cleaning."]
     d["search_score"] = np.mean(parts_s, axis=0) if len(parts_s) > 1 else parts_s[0]
@@ -805,7 +796,6 @@ def engagement_mismatches(df):
         np.where((d["search_score"] > 0.8) & (d["engagement_score"] < 0.2), "Clickbait Risk", None)
     )
 
-    # Sort by magnitude of mismatch
     mismatches = (
         d.dropna(subset=["mismatch_type"])
          .sort_values(by="mismatch_score", key=np.abs, ascending=False)
@@ -856,7 +846,6 @@ def engagement_mismatches(df):
     return cards
 
 def scatter_engagement_vs_search(df):
-    # Gracefully degrade if columns are missing or plotly is unavailable
     dur_col   = _pick_col(df, ["userEngagementDuration","engagement_duration"])
     br_col    = _pick_col(df, ["bounceRate","bounce_rate"])
     clicks_col= _pick_col(df, ["Clicks","gsc_clicks"])
@@ -872,7 +861,6 @@ def scatter_engagement_vs_search(df):
     for c in [dur_col, br_col, clicks_col, pos_col]:
         if c: t[c] = pd.to_numeric(t[c], errors="coerce")
 
-    # Fallback clicks proxy if needed
     if not clicks_col:
         proxy = _build_clicks_proxy(t)
         if proxy is not None:
@@ -899,7 +887,7 @@ def scatter_engagement_vs_search(df):
     )
 
     if px is None:
-        st.info("Plotly not available; showing a basic Streamlit scatter.")
+        st.info("Plotly not available; showing a basic table instead.")
         st.dataframe(agg[["msid","Title","engagement_score","search_score"]].head(20), use_container_width=True, hide_index=True)
         return
 
@@ -914,6 +902,7 @@ def scatter_engagement_vs_search(df):
     export_plot_html(fig, "engagement_vs_search")
 
 # ---------- UI: Module 4 ----------
+st.header("Insights")
 st.subheader("Module 4: Engagement vs Search Mismatch")
 cards = run_module_safely("Engagement vs Search", engagement_mismatches, filtered_df)
 cards = cards if isinstance(cards, list) else []
@@ -922,10 +911,10 @@ scatter_engagement_vs_search(filtered_df)
 st.divider()
 
 # ============================
-# PART 5/5: Category Performance, Trends & Forecasts, ROI (UPDATED)
+# PART 5/5: Category Performance & Trends/Forecasts (UPDATED)
 # ============================
 
-# Heatmap helper (unchanged; works if Plotly available)
+# Heatmap helper
 def category_heatmap(df, value_col, title):
     if px is None:
         st.info("Plotly not available for heatmaps."); return
@@ -939,31 +928,26 @@ def category_heatmap(df, value_col, title):
                              title=title, histfunc="sum")
     st.plotly_chart(fig, use_container_width=True, theme="streamlit"); export_plot_html(fig, f"heatmap_{value_col}")
 
-# --- Module 5: Category Performance (ROBUST & NO boolean-DF pitfalls) ---
+# --- Module 5: Category Performance (fixed to avoid DataFrame truthiness errors)
 def analyze_category_performance(df):
     d = df.copy()
     if d.empty: return pd.DataFrame()
 
-    # Ensure categories
     if "L1_Category" not in d.columns: d["L1_Category"] = "Uncategorized"
     if "L2_Category" not in d.columns: d["L2_Category"] = "Uncategorized"
     if "msid" not in d.columns: d["msid"] = range(len(d))
 
-    # Metric candidates
     engagement_col = next((c for c in ["userEngagementDuration","engagement_duration"] if c in d.columns), None)
     pageviews_col  = next((c for c in ["screenPageViews","pageviews"] if c in d.columns), None)
     users_col      = next((c for c in ["totalUsers","users"] if c in d.columns), None)
     clicks_col     = next((c for c in ["Clicks","gsc_clicks"] if c in d.columns), None)
 
-    # If nothing meaningful, return empty
     if not any([engagement_col, pageviews_col, users_col, clicks_col]):
         return pd.DataFrame()
 
-    # Coerce numerics where present
     for c in [engagement_col, pageviews_col, users_col, clicks_col]:
         if c: d[c] = pd.to_numeric(d[c], errors="coerce")
 
-    # Choose a traffic column (pageviews preferred)
     traffic_col = pageviews_col or users_col
 
     agg = {"msid":"nunique"}
@@ -979,7 +963,6 @@ def analyze_category_performance(df):
                                   clicks_col:"total_gsc_clicks" if clicks_col else None})
                  .reset_index())
 
-    # Site averages for index calculations
     site_avg_traffic = grouped["total_traffic"].mean() if "total_traffic" in grouped.columns else 0.0
     site_avg_eng     = grouped["avg_engagement_duration"].mean() if "avg_engagement_duration" in grouped.columns else 0.0
 
@@ -997,7 +980,7 @@ def analyze_category_performance(df):
     grouped["quadrant"] = grouped.apply(quadrant, axis=1) if "traffic_index" in grouped.columns and "engagement_index" in grouped.columns else "N/A"
     return grouped
 
-# --- Module 6: Trends & Forecasts (RESILIENT) ---
+# --- Module 6: Trends & Forecasts (resilient)
 def forecast_series(daily_series, periods=14):
     daily_series = daily_series.asfreq("D").fillna(method="ffill")
     if _HAS_STM and len(daily_series) >= 14:
@@ -1048,7 +1031,6 @@ else:
     # Optional charts
     if "total_traffic" in cat_df.columns and cat_df["total_traffic"].sum() > 0:
         st.subheader("Interactive Heatmap — Category Traffic")
-        # Pick the right value_col from the raw filtered_df for heatmap
         value_col = "screenPageViews" if "screenPageViews" in filtered_df.columns else ("totalUsers" if "totalUsers" in filtered_df.columns else None)
         if value_col:
             category_heatmap(filtered_df, value_col, "Category Performance Matrix (Traffic)")
@@ -1082,7 +1064,8 @@ if "date" in filtered_df.columns:
             st.plotly_chart(fig, use_container_width=True, theme="streamlit"); export_plot_html(fig, "forecast_overall")
         else:
             st.line_chart(daily, height=240)
-        # Also show a simple time series for best-available metric among Impressions/CTR/Position
+
+        # Simple time series for another key metric if available
         key_metric = "Impressions" if "Impressions" in tdf.columns else ("CTR" if "CTR" in tdf.columns else ("Position" if "Position" in tdf.columns else None))
         if key_metric:
             time_series_trends(tdf, key_metric, f"{key_metric} Over Time")
@@ -1091,5 +1074,3 @@ if "date" in filtered_df.columns:
 else:
     st.info("No date column for forecasting.")
 st.divider()
-
-# --- (Leave the rest of Part 5 — ROI & What-ifs, Executive Summary, etc. — as in your current code) ---
