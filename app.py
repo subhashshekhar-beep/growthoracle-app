@@ -546,8 +546,8 @@ def process_uploaded_files(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_ma
 gsc_ren = {
     gsc_map["date"]: "date", gsc_map["page"]: "page_url", gsc_map["query"]: "Query",
     gsc_map["clicks"]: "Clicks", # ADD THIS LINE
-    gsc_map["impr"]: "Impressions", gsc_map.get("ctr","CTR"): "CTR", gsc_map["pos"]: "Position"
-}
+    gsc_map["impr"]: "Impressions", gsc_map.get("ctr","CTR"): "CTR", gsc_map["pos"]: "Position"}
+
     for k in list(gsc_ren.keys()):
         if k not in gsc_df.columns:
             vc.add("Critical","MISSING_COL",f"GSC missing required column '{k}'"); return None, vc
@@ -555,7 +555,7 @@ gsc_ren = {
 
     # Early date standardization
     prod_df, ga4_df, gsc_df = standardize_dates_early(prod_df, ga4_df, gsc_df,
-                                                       {"prod": prod_map, "ga4": ga4_map, "gsc": gsc_map}, vc)
+    {"prod": prod_map, "ga4": ga4_map, "gsc": gsc_map}, vc)
 
     # Types
     for df, col in [(prod_df,"msid"),(ga4_df,"msid")]:
@@ -1224,3 +1224,4 @@ st.download_button("Download Executive Summary (JSON)", data=summary_json.encode
                    file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
 
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
+
