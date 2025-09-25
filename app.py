@@ -440,18 +440,17 @@ if step == "2) Upload & Map Columns":
         ga4_map["engagement"]= c5.selectbox("Engagement Duration", ga4_df_raw.columns, index=max(0, ga4_df_raw.columns.get_loc(ga4_map_guess.get("engagement","")) ) if ga4_map_guess.get("engagement") in ga4_df_raw.columns else 0)
         ga4_map["bounce"]    = st.selectbox("Bounce Rate", ga4_df_raw.columns, index=max(0, ga4_df_raw.columns.get_loc(ga4_map_guess.get("bounce","")) ) if ga4_map_guess.get("bounce") in ga4_df_raw.columns else 0)
 
-   with st.expander("GSC Mapping", expanded=True):
-    c1, c2, c3 = st.columns(3)
-    c4, c5, c6, c7 = st.columns(4)
-    gsc_map = {}
-    gsc_map["date"]   = c1.selectbox("Date", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("date","")) ) if gsc_map_guess.get("date") in gsc_df_raw.columns else 0)
-    gsc_map["page"]   = c2.selectbox("Page URL", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("page","")) ) if gsc_map_guess.get("page") in gsc_df_raw.columns else 0)
-    gsc_map["query"]  = c3.selectbox("Query", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("query","")) ) if gsc_map_guess.get("query") in gsc_df_raw.columns else 0)
-    
-    gsc_map["clicks"] = c4.selectbox("Clicks", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("clicks","")) ) if gsc_map_guess.get("clicks") in gsc_df_raw.columns else 0)
-    gsc_map["impr"]   = c5.selectbox("Impressions", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("impr","")) ) if gsc_map_guess.get("impr") in gsc_df_raw.columns else 0)
-    gsc_map["ctr"]    = c6.selectbox("CTR", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("ctr","")) ) if gsc_map_guess.get("ctr") in gsc_df_raw.columns else 0)
-    gsc_map["pos"]    = c7.selectbox("Position", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("pos","")) ) if gsc_map_guess.get("pos") in gsc_df_raw.columns else 0)
+     with st.expander("GSC Mapping", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        c4, c5, c6, c7 = st.columns(4)
+        gsc_map = {}
+        gsc_map["date"]   = c1.selectbox("Date", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("date","")) ) if gsc_map_guess.get("date") in gsc_df_raw.columns else 0)
+        gsc_map["page"]   = c2.selectbox("Page URL", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("page","")) ) if gsc_map_guess.get("page") in gsc_df_raw.columns else 0)
+        gsc_map["query"]  = c3.selectbox("Query", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("query","")) ) if gsc_map_guess.get("query") in gsc_df_raw.columns else 0)
+        gsc_map["clicks"] = c4.selectbox("Clicks", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("clicks","")) ) if gsc_map_guess.get("clicks") in gsc_df_raw.columns else 0)
+        gsc_map["impr"]   = c5.selectbox("Impressions", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("impr","")) ) if gsc_map_guess.get("impr") in gsc_df_raw.columns else 0)
+        gsc_map["ctr"]    = c6.selectbox("CTR", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("ctr","")) ) if gsc_map_guess.get("ctr") in gsc_df_raw.columns else 0)
+        gsc_map["pos"]    = c7.selectbox("Position", gsc_df_raw.columns, index=max(0, gsc_df_raw.columns.get_loc(gsc_map_guess.get("pos","")) ) if gsc_map_guess.get("pos") in gsc_df_raw.columns else 0)
 
     # quick validation
     _ = validate_columns_presence(prod_map, ga4_map, gsc_map, vc_read)
