@@ -1061,9 +1061,9 @@ if out is not None:
             msid = r["MSID"]
             with st.expander(f"Why this recommendation? — [{msid}] {r['Title'][:90]}"):
                 st.write(f"- **Best Avg Position**: {r['Best Avg Position']:.1f}")
-                st.write(f"- **Impressions**: {int(float(str(r['Total Impressions']).replace(',',''))):,}")
+                st.write(f"- **Impressions**: {int(float(r['Total Impressions'])):,}") # Corrected line
                 st.write(f"- **Site Avg CTR by rank**: {EXPECTED_CTR.get(int(round(r['Best Avg Position'])), 0.03):.2%}")
-                imp_num = int(str(r['Total Impressions']).replace(",",""))
+                imp_num = int(float(r['Total Impressions'])) # Corrected line
                 ctr_gain = st.slider(f"CTR improvement (%) for MSID {msid}", 1, 20, 5, key=f"sd_ctr_{msid}")
                 delta_clicks = what_if_ctr_gain(imp_num, expected_ctr_from_rank(r["Best Avg Position"]), ctr_gain)
                 st.write(f"- Estimated extra clicks: **{int(delta_clicks):,}**")
@@ -1212,3 +1212,4 @@ st.download_button("Download Executive Summary (JSON)", data=summary_json.encode
 
 
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
+
