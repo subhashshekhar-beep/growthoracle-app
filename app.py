@@ -1,4 +1,3 @@
-%%writefile app.py
 # ============================
 # app.py — GrowthOracle AI — Next Gen (Full)
 # PART 1/5: Imports, Config, Logger, Validation Core
@@ -1210,5 +1209,6 @@ summary_sections = {
 summary_json = json.dumps(summary_sections, indent=2, default=str)
 st.download_button("Download Executive Summary (JSON)", data=summary_json.encode("utf-8"),
                    file_name=f"executive_summary_{pd.Timestamp.now().strftime('%Y%m%d')}.json", mime="application/json")
+
 
 st.caption("Robust validation, standardized dates, merge stats, fail-safe modules, and explainable recommendations are enabled.")
