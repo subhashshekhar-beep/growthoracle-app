@@ -49,7 +49,7 @@ st.set_page_config(
     page_icon="📊"
 )
 st.title("GrowthOracle AI — Next Gen")
-st.caption("Time-aware insights • English SEO-title cannibalization • Interactive analytics • Explainable recommendations")
+st.caption("Time-aware insights • Interactive analytics • Explainable recommendations")
 
 # ---- Logger ----
 @st.cache_resource
@@ -1468,6 +1468,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
