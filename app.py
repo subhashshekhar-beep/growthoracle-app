@@ -806,8 +806,27 @@ if master_df.shape[0] > CONFIG["performance"]["sample_row_limit"]:
 else:
     analysis_df = master_df
 
+# --- Data Preview + Full CSV download ---
 st.subheader("Data Preview (First 10 rows)")
-st.dataframe(master_df.head(10), use_container_width=True, hide_index=True)
+col_prev, col_btn = st.columns([0.66, 0.34])
+
+with col_btn:
+    # Button to download the ENTIRE merged dataset
+    download_df_button(
+        master_df,
+        f"master_merged_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        "Download FULL merged dataset (CSV)"
+    )
+
+# (Optional) make the first-10 preview friendlier by showing 0 instead of None for key metrics
+preview_df = master_df.head(10).copy()
+for _c in ["Clicks","Impressions"]:
+    if _c in preview_df.columns:
+        preview_df[_c] = pd.to_numeric(preview_df[_c], errors="coerce").fillna(0)
+
+with col_prev:
+    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
 
 with st.expander("Data Summary", expanded=True):
     col1, col2, col3 = st.columns(3)
@@ -1501,6 +1520,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
