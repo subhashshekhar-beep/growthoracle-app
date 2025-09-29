@@ -1115,6 +1115,150 @@ def time_series_trends(df, metric_col, title):
             st.error(f"Failed to create time series chart: {e}")
     else:
         st.line_chart(daily_data)
+
+# --- Growth Efficiency (Resources → Outcomes) ---
+
+def compute_category_efficiency(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate inputs (articles) and outputs and compute efficiency per article."""
+    if df is None or df.empty: return pd.DataFrame()
+
+    d = df.copy()
+    # Ensure numeric
+    for col in ["totalUsers","screenPageViews","Clicks","Impressions","userEngagementDuration","bounceRate","Position"]:
+        if col in d.columns:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+
+    g = d.groupby(["L1_Category","L2_Category"]).agg(
+        total_articles = pd.NamedAgg(column="msid", aggfunc=lambda s: pd.Series(s).nunique()),
+        total_users    = pd.NamedAgg(column="totalUsers", aggfunc="sum") if "totalUsers" in d.columns else pd.NamedAgg(column="msid", aggfunc=lambda s: np.nan),
+        total_pvs      = pd.NamedAgg(column="screenPageViews", aggfunc="sum") if "screenPageViews" in d.columns else pd.NamedAgg(column="msid", aggfunc=lambda s: np.nan),
+        total_clicks   = pd.NamedAgg(column="Clicks", aggfunc="sum") if "Clicks" in d.columns else pd.NamedAgg(column="msid", aggfunc=lambda s: np.nan),
+        total_impr     = pd.NamedAgg(column="Impressions", aggfunc="sum") if "Impressions" in d.columns else pd.NamedAgg(column="msid", aggfunc=lambda s: np.nan),
+        avg_eng_s      = pd.NamedAgg(column="userEngagementDuration", aggfunc="mean") if "userEngagementDuration" in d.columns else pd.NamedAgg(column="msid", aggfunc=lambda s: np.nan),
+        avg_bounce     = pd.NamedAgg(column="bounceRate", aggfunc="mean") if "bounceRate" in d.columns else pd.NamedAgg(column="msid", aggfunc=lambda s: np.nan),
+        avg_position   = pd.NamedAgg(column="Position", aggfunc="mean") if "Position" in d.columns else pd.NamedAgg(column="msid", aggfunc=lambda s: np.nan)
+    ).reset_index()
+
+    # Per-article efficiency (guard against div/0)
+    g["users_per_article"] = g["total_users"]  / g["total_articles"].replace(0, np.nan)
+    g["pvs_per_article"]   = g["total_pvs"]    / g["total_articles"].replace(0, np.nan)
+    g["clicks_per_article"]= g["total_clicks"] / g["total_articles"].replace(0, np.nan)
+    g["impr_per_article"]  = g["total_impr"]   / g["total_articles"].replace(0, np.nan)
+
+    # Tidy NA
+    g = g.replace([np.inf, -np.inf], np.nan)
+
+    return g
+
+def plot_efficiency_quadrant(cat_df: pd.DataFrame, outcome: str, y_mode: str = "Total") -> None:
+    """
+    outcome ∈ {"total_users","total_pvs","total_clicks","total_impr"}
+    y_mode: "Total" or "Per Article"
+    """
+    if not _HAS_PLOTLY:
+        st.info("Plotly required for the quadrant chart."); return
+    if cat_df is None or cat_df.empty or "total_articles" not in cat_df.columns:
+        st.info("No category efficiency data to plot."); return
+    if outcome not in cat_df.columns and f"{outcome.split('_',1)[1]}_per_article" not in cat_df.columns:
+        st.info("Selected outcome not available."); return
+
+    df = cat_df.copy()
+    x = "total_articles"
+    if y_mode == "Total":
+        y = outcome
+        y_label = outcome.replace("_"," ").title()
+    else:
+        # map total_users -> users_per_article, etc.
+        per_map = {
+            "total_users": "users_per_article",
+            "total_pvs": "pvs_per_article",
+            "total_clicks": "clicks_per_article",
+            "total_impr": "impr_per_article",
+        }
+        y = per_map.get(outcome)
+        y_label = y.replace("_"," ").title() if y else "Per Article"
+
+    df = df.dropna(subset=[x, y])
+    if df.empty:
+        st.info("Nothing to display after cleaning."); return
+
+    # Medians for quadrant split
+    x_med = df[x].median()
+    y_med = df[y].median()
+
+    fig = px.scatter(
+        df, x=x, y=y, color="L1_Category", size="total_clicks" if "total_clicks" in df.columns else None,
+        hover_data=["L1_Category","L2_Category","total_articles","total_users","total_pvs","users_per_article","pvs_per_article"],
+        title=f"Resources → Outcomes Quadrant ({'Total' if y_mode=='Total' else 'Efficiency'})"
+    )
+
+    # Add median lines
+    fig.add_hline(y=y_med, line_dash="dash", opacity=0.4)
+    fig.add_vline(x=x_med, line_dash="dash", opacity=0.4)
+
+    # Annotations for quadrants
+    fig.add_annotation(x=x_med*0.5, y=y_med*1.1, text="Under-invested winners\n(Low input, High output)", showarrow=False)
+    fig.add_annotation(x=x_med*1.5 if x_med>0 else 1, y=y_med*0.6, text="Over-invested laggards\n(High input, Low output)", showarrow=False)
+
+    fig.update_layout(margin=dict(l=10,r=10,t=50,b=10))
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+
+def opportunity_lists(cat_df: pd.DataFrame, outcome: str, y_mode: str = "Total") -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (under_invested, over_invested) tables with potential gain/excess vs median production."""
+    if cat_df is None or cat_df.empty: return pd.DataFrame(), pd.DataFrame()
+
+    df = cat_df.copy()
+    x = "total_articles"
+    if y_mode == "Total":
+        y = outcome
+        y_per_article_col = {
+            "total_users": "users_per_article",
+            "total_pvs": "pvs_per_article",
+            "total_clicks": "clicks_per_article",
+            "total_impr": "impr_per_article",
+        }[outcome]
+    else:
+        # If plotting efficiency, still compute potential using per-article metric
+        per_map = {
+            "total_users": "users_per_article",
+            "total_pvs": "pvs_per_article",
+            "total_clicks": "clicks_per_article",
+            "total_impr": "impr_per_article",
+        }
+        y = per_map[outcome]
+        y_per_article_col = y
+
+    df = df.dropna(subset=[x, y, y_per_article_col])
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    x_med = df[x].median()
+    y_med = df[y].median()
+
+    # Tags
+    df["tag"] = np.where((df[x] < x_med) & (df[y] >= y_med), "Under-invested", 
+                  np.where((df[x] >= x_med) & (df[y] < y_med), "Over-invested", "Other"))
+
+    # Potential: move each category to median production at current efficiency
+    df["delta_articles_to_median"] = (x_med - df[x]).clip(lower=0)  # only for under-invested
+    df["potential_gain"] = (df["delta_articles_to_median"] * df[y_per_article_col]).round(0)
+
+    under = (df[df["tag"] == "Under-invested"]
+             .sort_values(["potential_gain", y_per_article_col], ascending=False)
+             [["L1_Category","L2_Category","total_articles",y,y_per_article_col,"delta_articles_to_median","potential_gain"]]
+             .rename(columns={
+                 y: ("Outcome (Y)" if y_mode=="Total" else y_label if 'y_label' in locals() else "Outcome"),
+                 y_per_article_col: "Outcome per Article"
+             }))
+
+    over = (df[df["tag"] == "Over-invested"]
+            .assign(excess_articles_vs_median=(df[x] - x_med).clip(lower=0))
+            .sort_values(["excess_articles_vs_median", x], ascending=False)
+            [["L1_Category","L2_Category","total_articles","excess_articles_vs_median", y_per_article_col]]
+            .rename(columns={y_per_article_col: "Outcome per Article"}))
+
+    return under, over
+
 # ============================
 # PART 5/5: Complete Analysis UI & Exports
 # ============================
@@ -1234,6 +1378,64 @@ if "date" in filtered_df.columns and not filtered_df.empty:
 else:
     st.info("Date column required for trend analysis and forecasting.")
 
+# --- Growth Efficiency (Resources → Outcomes) ---
+st.divider()
+st.subheader("📈 Growth Efficiency — Resources → Outcomes")
+
+cat_eff = compute_category_efficiency(filtered_df)
+if cat_eff is None or cat_eff.empty:
+    st.info("No category efficiency data available.")
+else:
+    # Choose the outcome proxy
+    outcome_choice = st.selectbox(
+        "Outcome metric",
+        [c for c in ["total_users","total_pvs","total_clicks","total_impr"] if c in cat_eff.columns],
+        format_func=lambda x: {
+            "total_users":"Users",
+            "total_pvs":"Pageviews",
+            "total_clicks":"GSC Clicks",
+            "total_impr":"GSC Impressions"
+        }[x]
+    )
+
+    y_mode = st.radio("Y-axis", ["Total","Per Article"], index=0, horizontal=True)
+
+    # Quadrant chart
+    plot_efficiency_quadrant(cat_eff, outcome_choice, y_mode=y_mode)
+
+    # Leaderboard
+    with st.expander("Efficiency Table (downloadable)", expanded=False):
+        show_cols = ["L1_Category","L2_Category","total_articles",
+                     "total_users","total_pvs","total_clicks","total_impr",
+                     "users_per_article","pvs_per_article","clicks_per_article","impr_per_article",
+                     "avg_eng_s","avg_bounce","avg_position"]
+        show_cols = [c for c in show_cols if c in cat_eff.columns]
+        st.dataframe(cat_eff[show_cols].sort_values("pvs_per_article" if "pvs_per_article" in cat_eff.columns else "users_per_article", ascending=False),
+                     use_container_width=True, hide_index=True)
+        download_df_button(cat_eff[show_cols], f"growth_efficiency_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                           "Download Growth Efficiency (CSV)")
+
+    # Action lists
+    under, over = opportunity_lists(cat_eff, outcome_choice, y_mode=y_mode)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### 🚀 Under-invested Winners (scale production)")
+        if not under.empty:
+            st.dataframe(under.head(15), use_container_width=True, hide_index=True)
+            download_df_button(under, f"under_invested_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                               "Download Under-invested (CSV)")
+        else:
+            st.info("None detected at current thresholds.")
+    with c2:
+        st.markdown("### 🧰 Over-invested Laggards (fix or reduce)")
+        if not over.empty:
+            st.dataframe(over.head(15), use_container_width=True, hide_index=True)
+            download_df_button(over, f"over_invested_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                               "Download Over-invested (CSV)")
+        else:
+            st.info("None detected at current thresholds.")
+
+
 # ============================
 # EXPORT & SUMMARY
 # ============================
@@ -1266,3 +1468,6 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
+
+
