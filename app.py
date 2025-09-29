@@ -993,6 +993,23 @@ def scatter_engagement_vs_search(df):
             st.error(f"Failed to create scatter plot: {e}")
     else:
         st.scatter_chart(plot_data, x=search_col, y=engagement_col, size=size_col, color="L1_Category")
+# --- Utility: Export Plotly figure as downloadable HTML (NEW) ---
+def export_plot_html(fig, name: str):
+    """Show a download button to export a Plotly fig as a standalone HTML file."""
+    if to_html is None or fig is None:
+        st.info("Plotly HTML export not available.")
+        return
+    try:
+        html_str = to_html(fig, include_plotlyjs="cdn", full_html=True)
+        st.download_button(
+            label=f"Export {name} (HTML)",
+            data=html_str.encode("utf-8"),
+            file_name=f"{name}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.html",
+            mime="text/html",
+            use_container_width=True
+        )
+    except Exception as e:
+        st.warning(f"Failed to export plot: {e}")
 
 def category_treemap(df, value_col, title):
     if not _HAS_PLOTLY:
@@ -1468,6 +1485,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
