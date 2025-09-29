@@ -1388,8 +1388,8 @@ def time_series_trends(df, metric_col, title):
 
 st.header("📊 Advanced Analytics & Insights")
 
-# Module 4: Engagement vs Search Mismatch
-st.subheader("Module 4: Engagement vs Search Performance Mismatch")
+# Module 1: Engagement vs Search Mismatch
+st.subheader("Module 1: Engagement vs Search Performance Mismatch")
 st.caption("Identify content with high engagement but poor search performance (Hidden Gems) and vice versa (Clickbait Risks)")
 
 engagement_cards = run_module_safely(
@@ -1411,8 +1411,8 @@ st.divider()
 # PART 5/5: Complete Analysis & Export
 # ============================
 
-# Module 5: Category Performance
-st.subheader("Module 5: Category Performance Analysis")
+# Module 2: Category Performance
+st.subheader("Module 2: Category Performance Analysis")
 st.caption("Understand how different content categories perform across traffic and engagement metrics")
 
 category_results = run_module_safely(
@@ -1447,8 +1447,8 @@ else:
 
 st.divider()
 
-# Module 6: Trends & Forecasting
-st.subheader("Module 6: Trends & Forecasting")
+# Module 3: Trends & Forecasting
+st.subheader("Module 3: Trends & Forecasting")
 st.caption("Analyze historical trends and generate performance forecasts")
 
 # Create sample time series data for forecasting demo
@@ -1570,5 +1570,6 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | Advanced SEO & Content Intelligence Platform")
+
 
 
