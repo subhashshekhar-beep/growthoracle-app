@@ -962,72 +962,128 @@ def build_engagement_mismatch_table(df: pd.DataFrame) -> pd.DataFrame:
     ] if c in d.columns]
     return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"])
 
-def scatter_engagement_vs_search(df):
-    """Cleaner scatter — aggregated & filtered for readability, axis fixes, invert Position if used."""
+def scatter_engagement_vs_search(df: pd.DataFrame):
+    """Configurable scatter: choose metrics, filter noise, and aggregate to one-dot-per-page."""
     if df is None or df.empty:
-        st.info("No data available for scatter plot"); return
+        st.info("No data available for scatter plot")
+        return
 
-    with st.expander("Scatter Options", expanded=True):
-        aggregate_msids = st.checkbox("Aggregate by article (recommended)", value=True)
-        min_impr = st.slider("Min impressions to include", 0, 5000, TH["min_impressions"], step=50)
-        max_points = st.slider("Max points to plot (after filtering)", 200, 5000, 1500, step=100)
+    d = df.copy()
 
-    base = df.copy()
-    if "Impressions" in base.columns:
-        base = base[pd.to_numeric(base["Impressions"], errors="coerce").fillna(0) >= min_impr]
+    # Detect available fields
+    y_opts = [c for c in ["userEngagementDuration", "totalUsers", "screenPageViews"] if c in d.columns]
+    x_opts = [c for c in ["CTR", "Position"] if c in d.columns]
+    size_opts = [c for c in ["Clicks", "screenPageViews", "Impressions", "totalUsers"] if c in d.columns]
+    color_opts = [c for c in ["L1_Category", "L2_Category"] if c in d.columns]
 
-    # pick axes
-    engagement_col = _pick_col(base, ["userEngagementDuration", "totalUsers"])
-    # prefer CTR for x, else Position
-    search_col = "CTR" if "CTR" in base.columns else ("Position" if "Position" in base.columns else None)
-    size_col = _pick_col(base, ["Clicks", "screenPageViews", "Impressions"])
+    if not y_opts or not x_opts or not size_opts:
+        st.info("Insufficient metrics for a meaningful scatter plot (need engagement, search, and size metrics).")
+        return
 
-    if not engagement_col or not search_col or not size_col:
-        st.info("Need engagement, search, and a size metric to plot."); return
+    # Controls
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        x = st.selectbox("Search (X)", x_opts, index=0,
+                         help="CTR or Position (we'll flip axis for Position so left=better).")
+    with c2:
+        y = st.selectbox("Engagement (Y)", y_opts, index=0,
+                         help="Pick a proxy for engagement/outcomes.")
+    with c3:
+        size_col = st.selectbox("Bubble size", size_opts, index=0,
+                                help="Represents scale; larger = more important.")
+    with c4:
+        color_col = st.selectbox("Color by", color_opts, index=0)
 
-    if aggregate_msids:
-        agg = {
-            engagement_col: "mean",
-            size_col: "sum"
-        }
-        if search_col == "CTR":
-            agg[search_col] = "mean"
-        elif search_col == "Position":
-            agg[search_col] = "mean"
-        cols = ["msid","Title","L1_Category", engagement_col, search_col, size_col]
-        plot_data = base[cols].dropna().groupby(["msid","Title","L1_Category"], as_index=False).agg(agg)
-    else:
-        plot_data = base[["msid","Title","L1_Category", engagement_col, search_col, size_col]].dropna()
+    # Noise gates
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        min_impr = st.number_input("Min Impressions", min_value=0, value=200, step=50) if "Impressions" in d.columns else 0
+    with f2:
+        min_clicks = st.number_input("Min Clicks", min_value=0, value=5, step=5) if "Clicks" in d.columns else 0
+    with f3:
+        gran = st.radio("Granularity", ["Raw (date×query×page)", "One per page (weighted)"], index=1, horizontal=True)
 
-    if len(plot_data) > max_points:
-        plot_data = plot_data.sample(max_points, random_state=CONFIG["performance"]["seed"])
+    # Clean numerics
+    for c in list({x, y, size_col} | {"Impressions", "Clicks", "CTR", "Position"}):
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
 
-    if plot_data.empty:
-        st.info("No complete data available for scatter plot after cleaning."); return
+    # Filters
+    if "Impressions" in d.columns and min_impr > 0:
+        d = d[d["Impressions"] >= min_impr]
+    if "Clicks" in d.columns and min_clicks > 0:
+        d = d[d["Clicks"] >= min_clicks]
 
-    if _HAS_PLOTLY:
-        try:
-            title = f"Engagement ({engagement_col}) vs. Search ({search_col})"
-            fig = px.scatter(
-                plot_data,
-                x=search_col, y=engagement_col,
-                size=size_col, color="L1_Category",
-                hover_data=["msid","Title"],
-                title=title,
-                labels={engagement_col: engagement_col.replace("_"," ").title()}
+    # Aggregate to one dot per page (weighted by Impressions if available, else Clicks)
+    if gran.startswith("One per page"):
+        w = "Impressions" if "Impressions" in d.columns else ("Clicks" if "Clicks" in d.columns else None)
+        keys = ["msid", "Title", "L1_Category", "L2_Category"]
+        for k in keys:
+            if k not in d.columns: d[k] = np.nan
+
+        if w:
+            d["_w"] = pd.to_numeric(d[w], errors="coerce").fillna(0)
+            grp = d.groupby(keys, as_index=False).agg(
+                **{
+                    size_col: (size_col, "sum") if size_col in ["Clicks", "Impressions", "screenPageViews", "totalUsers"] else (size_col, "mean"),
+                    "w_sum": ("_w", "sum"),
+                    "CTR_num": ("Clicks", "sum") if "Clicks" in d.columns else (size_col, "sum"),
+                    "CTR_den": ("Impressions", "sum") if "Impressions" in d.columns else ("_w", "sum"),
+                    "Position_w": ("Position", lambda s: np.average(pd.to_numeric(s, errors='coerce').fillna(np.nan), weights=d.loc[s.index, "_w"]) if "Position" in d.columns else np.nan),
+                    "Y_w": (y,  lambda s: np.average(pd.to_numeric(s, errors='coerce').fillna(np.nan), weights=d.loc[s.index, "_w"]))
+                }
             )
-            # Invert x-axis if it's Position (lower is better)
-            if search_col == "Position":
-                fig.update_layout(xaxis=dict(autorange="reversed"))
-            # Neater bubbles & layout
-            fig.update_traces(marker=dict(opacity=0.7, line=dict(width=0.5)))
-            fig.update_layout(margin=dict(l=10,r=10,t=60,b=10))
-            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-            export_plot_html(fig, "engagement_vs_search")
-        except Exception as e:
-            st.error(f"Failed to create scatter plot: {e}")
+            # Rebuild X after weighting
+            if x == "CTR" and "CTR_num" in grp.columns and "CTR_den" in grp.columns:
+                grp["CTR"] = np.where(grp["CTR_den"] > 0, grp["CTR_num"] / grp["CTR_den"], np.nan)
+            elif x == "Position" and "Position_w" in grp.columns:
+                grp["Position"] = grp["Position_w"]
+            grp[y] = grp["Y_w"]
+            plot_data = grp.drop(columns=["w_sum","CTR_num","CTR_den","Position_w","Y_w"], errors="ignore")
+        else:
+            # No weight available → simple mean
+            plot_data = d.groupby(keys, as_index=False).agg(
+                **{x: (x, "mean"), y: (y, "mean"), size_col: (size_col, "sum")}
+            )
     else:
-        st.scatter_chart(plot_data, x=search_col, y=engagement_col, size=size_col, color="L1_Category")
+        # Raw instances
+        base_cols = ["msid", "Title", color_col, x, y, size_col]
+        extra = [c for c in ["Query", "date"] if c in d.columns]
+        plot_data = d[ [c for c in base_cols + extra if c in d.columns] ].copy()
+
+    # Final clean
+    plot_data = plot_data.dropna(subset=[x, y, size_col])
+    if plot_data.empty:
+        st.info("No points left after filters.")
+        return
+
+    # Optional sampling to keep it readable
+    max_points = st.slider("Max points", 500, 10000, 3000, step=500)
+    if len(plot_data) > max_points:
+        plot_data = plot_data.nlargest(max_points, size_col)  # keep the biggest
+
+    # Build chart
+    if _HAS_PLOTLY:
+        fig = px.scatter(
+            plot_data,
+            x=x, y=y, size=size_col, color=color_col,
+            hover_data=[c for c in ["msid", "Title", "Query", "date"] if c in plot_data.columns],
+            title=f"Engagement ({y}) vs Search ({x})",
+            size_max=60, opacity=0.65,
+            trendline="ols"  # adds a best-fit line if statsmodels is available
+        )
+        # Flip Position axis (lower is better)
+        if x == "Position":
+            fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
+        st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+        export_plot_html(fig, "engagement_vs_search")
+    else:
+        st.scatter_chart(plot_data, x=x, y=y, size=size_col, color=color_col)
+
+    # Download the plotted data
+    download_df_button(plot_data, f"scatter_data_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                       "Download plotted points (CSV)")
+
 # --- Utility: Export Plotly figure as downloadable HTML (NEW) ---
 def export_plot_html(fig, name: str):
     """Show a download button to export a Plotly fig as a standalone HTML file."""
@@ -1520,6 +1576,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
