@@ -686,22 +686,38 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
         if not gsc_df.empty: gsc_df["msid"] = gsc_df["msid"].astype("int64")
 
     # 3) Robust numeric conversion
+        # --- 3. ROBUST NUMERIC CONVERSION (IMPROVED) ---
     if gsc_df is not None:
+        # 3a) Pre-clean text numbers: remove thousands separators and NBSPs
+        def _clean_num_str(s: pd.Series) -> pd.Series:
+            return (
+                s.astype(str)
+                 .str.replace(r"[\u2009\u00A0,\s]", "", regex=True)  # thin space, NBSP, commas, spaces
+                 .str.replace(r"^-+$", "", regex=True)              # dashes to empty
+                 .str.strip()
+            )
+
+        for col in ["Clicks", "Impressions", "Position"]:
+            if col in gsc_df.columns and gsc_df[col].dtype == "object":
+                gsc_df[col] = _clean_num_str(gsc_df[col])
+
+        # CTR may arrive like "3.4%" or "3,4 %"
+        if "CTR" in gsc_df.columns and gsc_df["CTR"].dtype == "object":
+            tmp = _clean_num_str(gsc_df["CTR"])
+            tmp = tmp.str.replace("%", "", regex=False)
+            gsc_df["CTR"] = pd.to_numeric(tmp, errors="coerce") / 100.0
+
+        # 3b) Now coerce to numeric + clamp
         for col, clamp in [("Clicks", (0, None)), ("Impressions", (0, None)), ("Position", (1, 100))]:
             if col in gsc_df.columns:
                 gsc_df[col] = coerce_numeric(gsc_df[col], f"GSC.{col}", vc, clamp=clamp)
+
+        # If CTR didn’t exist, compute it
         if "CTR" in gsc_df.columns:
-            if gsc_df["CTR"].dtype == 'object' and gsc_df["CTR"].astype(str).str.contains('%').any():
-                gsc_df["CTR"] = pd.to_numeric(gsc_df["CTR"].astype(str).str.replace('%', ''), errors='coerce') / 100.0
             gsc_df["CTR"] = coerce_numeric(gsc_df["CTR"], "GSC.CTR", vc, clamp=(0, 1))
         elif "Clicks" in gsc_df.columns and "Impressions" in gsc_df.columns:
             vc.add("Info", "CTR_CALCULATED", "CTR column calculated from Clicks/Impressions")
             gsc_df["CTR"] = (gsc_df["Clicks"] / gsc_df["Impressions"].replace(0, np.nan)).fillna(0)
-
-    if ga4_df is not None:
-        for col in ["screenPageViews", "totalUsers", "userEngagementDuration", "bounceRate"]:
-            if col in ga4_df.columns:
-                ga4_df[col] = coerce_numeric(ga4_df[col], f"GA4.{col}", vc)
 
     # 4) Merge
     if gsc_df is None or prod_df is None or gsc_df.empty or prod_df.empty:
@@ -1485,6 +1501,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
