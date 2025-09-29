@@ -136,11 +136,11 @@ class ValidationCollector:
         self.checkpoints.append({"name": name, **data})
 
     def quality_score(self) -> float:
-        crit = sum(1 for m in self.messages if m.category == "Critical")
-        warn = sum(1 for m in m in self.messages if m.category == "Warning")
-        info = sum(1 for m in self.messages if m.category == "Info")
-        score = 100 - (25 * crit + 8 * warn + 1 * info)
-        return float(max(0, min(100, score)))
+    crit = sum(1 for m in self.messages if m.category == "Critical")
+    warn = sum(1 for m in self.messages if m.category == "Warning") # <--- Corrected
+    info = sum(1 for m in self.messages if m.category == "Info")    # <--- Corrected
+    score = 100 - (25 * crit + 8 * warn + 1 * info)
+    return float(max(0, min(100, score)))
 
     def to_dataframe(self) -> pd.DataFrame:
         if not self.messages:
@@ -1980,3 +1980,4 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | Advanced SEO & Content Intelligence Platform")
+
