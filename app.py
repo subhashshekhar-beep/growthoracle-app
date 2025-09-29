@@ -1282,7 +1282,7 @@ def opportunity_lists(cat_df: pd.DataFrame, outcome: str, y_mode: str = "Total")
 st.header("📊 Advanced Analytics & Insights")
 
 # Module: Engagement vs Search Mismatch — cards + full CSV
-st.subheader("Engagement vs. Search Performance Mismatch")
+st.subheader("Module 1 : Engagement vs. Search Performance Mismatch")
 st.caption("Identify 'Hidden Gems' (high CTR at poor positions), low CTR at good positions, and high bounce at good positions.")
 
 engagement_cards = engagement_mismatches(filtered_df)
@@ -1308,7 +1308,7 @@ scatter_engagement_vs_search(filtered_df)
 st.divider()
 
 # Module 5: Category Performance
-st.subheader("Category Performance Analysis")
+st.subheader("Module 2 : Category Performance Analysis")
 st.caption("Performance by category with users, session duration, bounce, representative query, and average position.")
 
 category_results = analyze_category_performance(filtered_df)
@@ -1346,7 +1346,7 @@ else:
 st.divider()
 
 # Module 6: Trends & Forecasting
-st.subheader("Trends & Forecasting")
+st.subheader("Module 3: Trends & Forecasting")
 st.caption("We’ve removed the 'Clicks over time' chart per your request. Choose a different trend metric below. The forecast shows dashed line with a shaded 95% interval.")
 
 if "date" in filtered_df.columns and not filtered_df.empty:
@@ -1397,7 +1397,7 @@ else:
 
 # --- Growth Efficiency (Resources → Outcomes) ---
 st.divider()
-st.subheader("📈 Growth Efficiency — Resources → Outcomes")
+st.subheader("📈 Module 4: Growth Efficiency — Resources → Outcomes")
 
 cat_eff = compute_category_efficiency(filtered_df)
 if cat_eff is None or cat_eff.empty:
@@ -1485,6 +1485,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
