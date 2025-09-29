@@ -661,6 +661,12 @@ def run_validation_pipeline(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_m
         
     return vc
 
+# ============================
+# PART 3/5: Onboarding Steps, Mapping UI, Validation UI, Robust Processing
+# ============================
+
+# [Keep all the previous code until the validation report section...]
+
 st.subheader("Data Validation Report")
 vc0 = run_validation_pipeline(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map)
 rep_df = vc0.to_dataframe()
@@ -677,7 +683,6 @@ else:
             else:
                 st.info(f"No {cat} issues")
     
-    # FIXED: This line was causing the error - now uses the fixed quality_score method
     st.caption(f"Data Quality Score (pre-processing): **{vc0.quality_score():.0f} / 100**")
     st.download_button(
         "Download Validation Report (CSV)", 
@@ -686,16 +691,7 @@ else:
         mime="text/csv"
     )
 
-# Simplified processing function for demonstration
-@st.cache_data(show_spinner=False)
-# ============================
-# PART 3/5: Onboarding Steps, Mapping UI, Validation UI, Robust Processing
-# ============================
-
-# [Keep all the previous functions and code until the processing section...]
-
-# Replace the simple processing function with this COMPLETE version:
-
+# Define the standardize_dates_early function (it was missing)
 def standardize_dates_early(prod_df, ga4_df, gsc_df, mappings, vc: ValidationCollector):
     """Standardize date formats early in processing pipeline"""
     
@@ -713,15 +709,16 @@ def standardize_dates_early(prod_df, ga4_df, gsc_df, mappings, vc: ValidationCol
     def normalize_date_only(df, col_name, out_name):
         if df is not None and col_name in df.columns:
             dt = safe_dt_parse(df[col_name], col_name, vc)
-            df[out_name] = dt.dt.date
-            if dt.notna().any():
-                maxd, mind = dt.max(), dt.min()
-                maxd_utc, mind_utc = _ensure_utc(maxd), _ensure_utc(mind)
-                now_utc = pd.Timestamp.now(tz="UTC")
-                if (pd.notna(maxd_utc)) and (maxd_utc > now_utc + pd.Timedelta(days=1)):
-                    vc.add("Warning", "FUTURE_DATE", f"{out_name} has future dates", sample=str(maxd_utc))
-                if (pd.notna(mind_utc)) and (mind_utc < pd.Timestamp(2020, 1, 1, tz="UTC")):
-                    vc.add("Info", "OLD_DATE", f"{out_name} includes <2020 dates", earliest=str(mind_utc))
+            if dt is not None and len(dt) > 0:
+                df[out_name] = dt.dt.date
+                if dt.notna().any():
+                    maxd, mind = dt.max(), dt.min()
+                    maxd_utc, mind_utc = _ensure_utc(maxd), _ensure_utc(mind)
+                    now_utc = pd.Timestamp.now(tz="UTC")
+                    if (pd.notna(maxd_utc)) and (maxd_utc > now_utc + pd.Timedelta(days=1)):
+                        vc.add("Warning", "FUTURE_DATE", f"{out_name} has future dates", sample=str(maxd_utc))
+                    if (pd.notna(mind_utc)) and (mind_utc < pd.Timestamp(2020, 1, 1, tz="UTC")):
+                        vc.add("Info", "OLD_DATE", f"{out_name} includes <2020 dates", earliest=str(mind_utc))
 
     # Process production data
     p = prod_df.copy() if prod_df is not None else None
@@ -757,7 +754,7 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
     """COMPLETE processing pipeline that processes ALL data"""
     vc = ValidationCollector()
     
-    # Load previous validation messages
+    # Load previous validation messages if provided
     if vc_serialized:
         try:
             messages = json.loads(vc_serialized)
@@ -855,7 +852,7 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
     # Convert MSIDs to numeric
     try:
         for df, col in [(prod_df, "msid"), (ga4_df, "msid")]:
-            if df is not None:
+            if df is not None and len(df) > 0:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
                 bad = df[col].isna().sum()
                 if bad > 0:
@@ -868,7 +865,7 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
 
     # Extract MSID from GSC URLs
     try:
-        if gsc_df is not None and "msid" not in gsc_df.columns:
+        if gsc_df is not None and len(gsc_df) > 0 and "msid" not in gsc_df.columns:
             def _extract_msid_from_url(url):
                 if pd.isna(url):
                     return None
@@ -890,7 +887,7 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
 
     # Numeric coercions for GSC
     try:
-        if gsc_df is not None:
+        if gsc_df is not None and len(gsc_df) > 0:
             if "Impressions" in gsc_df.columns:
                 gsc_df["Impressions"] = coerce_numeric(gsc_df["Impressions"], "GSC.Impressions", vc, clamp=(0, float("inf")))
             
@@ -898,17 +895,18 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
                 if gsc_df["CTR"].dtype == object:
                     tmp = gsc_df["CTR"].astype(str).str.replace("%", "", regex=False)
                     ctr_val = pd.to_numeric(tmp, errors="coerce")
-                    if (ctr_val > 1.0).any():
+                    if len(ctr_val) > 0 and (ctr_val > 1.0).any():
                         ctr_val = ctr_val / 100.0
                         vc.add("Info", "CTR_SCALE", "CTR parsed as percentage (÷100)")
                     gsc_df["CTR"] = ctr_val
                 else:
                     gsc_df["CTR"] = pd.to_numeric(gsc_df["CTR"], errors="coerce")
                 
-                out_of_bounds = ((gsc_df["CTR"] < 0) | (gsc_df["CTR"] > 1)).sum()
-                if out_of_bounds > 0:
-                    vc.add("Warning", "CTR_CLAMP", "CTR values clamped to [0,1]", rows=int(out_of_bounds))
-                    gsc_df["CTR"] = gsc_df["CTR"].clip(0, 1)
+                if len(gsc_df) > 0:
+                    out_of_bounds = ((gsc_df["CTR"] < 0) | (gsc_df["CTR"] > 1)).sum()
+                    if out_of_bounds > 0:
+                        vc.add("Warning", "CTR_CLAMP", "CTR values clamped to [0,1]", rows=int(out_of_bounds))
+                        gsc_df["CTR"] = gsc_df["CTR"].clip(0, 1)
             
             if "Position" in gsc_df.columns:
                 gsc_df["Position"] = coerce_numeric(gsc_df["Position"], "GSC.Position", vc, clamp=(1, 100))
@@ -917,7 +915,7 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
 
     # Parse categories from Path
     try:
-        if prod_df is not None and "Path" in prod_df.columns:
+        if prod_df is not None and len(prod_df) > 0 and "Path" in prod_df.columns:
             def parse_path(path_str):
                 if not isinstance(path_str, str):
                     return ("Uncategorized", "Uncategorized")
@@ -935,12 +933,12 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
             cat_tuples = prod_df["Path"].apply(parse_path)
             prod_df[["L1_Category", "L2_Category"]] = pd.DataFrame(cat_tuples.tolist(), index=prod_df.index)
         else:
-            if prod_df is not None:
+            if prod_df is not None and len(prod_df) > 0:
                 prod_df["L1_Category"] = "Uncategorized"
                 prod_df["L2_Category"] = "Uncategorized"
     except Exception as e:
         vc.add("Warning", "CATEGORY_PARSE_FAIL", f"Category parsing failed: {e}")
-        if prod_df is not None:
+        if prod_df is not None and len(prod_df) > 0:
             prod_df["L1_Category"] = "Uncategorized"
             prod_df["L2_Category"] = "Uncategorized"
 
@@ -952,7 +950,7 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
     }
     
     try:
-        if gsc_df is not None and prod_df is not None:
+        if gsc_df is not None and len(gsc_df) > 0 and prod_df is not None and len(prod_df) > 0:
             # Get all available columns from production
             prod_cols = ["msid"]
             for col in ["Title", "Path", "Publish Time", "L1_Category", "L2_Category"]:
@@ -975,7 +973,7 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
 
     # Prepare GA4 daily aggregates
     try:
-        if ga4_df is not None and "date" in ga4_df.columns:
+        if ga4_df is not None and len(ga4_df) > 0 and "date" in ga4_df.columns:
             # Get numeric columns for aggregation
             numeric_cols = []
             for col in ["screenPageViews", "totalUsers", "userEngagementDuration", "bounceRate"]:
@@ -997,7 +995,7 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
 
     # Final merge with GA4
     try:
-        if not ga4_daily.empty:
+        if ga4_daily is not None and len(ga4_daily) > 0:
             master_df = pd.merge(merged_1, ga4_daily, on=["msid", "date"], how=ms.get("ga4_align", "left"))
         else:
             master_df = merged_1.copy()
@@ -1010,44 +1008,48 @@ def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_ma
 
     # Final data cleaning
     try:
-        # Deduplicate
-        subset_cols = [c for c in ["date", "msid", "Query"] if c in master_df.columns]
-        if len(subset_cols) >= 2:  # Need at least 2 columns for meaningful dedup
-            dup_before = master_df.duplicated(subset=subset_cols).sum()
-            if dup_before > 0:
-                vc.add("Info", "DEDUP", "Duplicate rows removed", count=int(dup_before))
-                master_df = master_df.drop_duplicates(subset=subset_cols, keep="first").reset_index(drop=True)
+        if master_df is not None and len(master_df) > 0:
+            # Deduplicate
+            subset_cols = [c for c in ["date", "msid", "Query"] if c in master_df.columns]
+            if len(subset_cols) >= 2:  # Need at least 2 columns for meaningful dedup
+                dup_before = master_df.duplicated(subset=subset_cols).sum()
+                if dup_before > 0:
+                    vc.add("Info", "DEDUP", "Duplicate rows removed", count=int(dup_before))
+                    master_df = master_df.drop_duplicates(subset=subset_cols, keep="first").reset_index(drop=True)
 
-        # Impute missing values
-        if "CTR" in master_df.columns:
-            master_df["CTR"] = master_df["CTR"].fillna(0.0)
-            
-        if "Position" in master_df.columns:
-            miss = master_df["Position"].isna().sum()
-            if miss > 0:
-                master_df["Position"] = master_df["Position"].fillna(50.0)
-                vc.add("Info", "POSITION_IMPUTE", "Missing Position imputed to 50.0", rows=int(miss))
+            # Impute missing values
+            if "CTR" in master_df.columns:
+                master_df["CTR"] = master_df["CTR"].fillna(0.0)
+                
+            if "Position" in master_df.columns:
+                miss = master_df["Position"].isna().sum()
+                if miss > 0:
+                    master_df["Position"] = master_df["Position"].fillna(50.0)
+                    vc.add("Info", "POSITION_IMPUTE", "Missing Position imputed to 50.0", rows=int(miss))
 
-        # Remove rows without titles
-        if "Title" in master_df.columns:
-            drop_title_n = master_df["Title"].isna().sum()
-            if drop_title_n > 0:
-                vc.add("Warning", "TITLE_MISSING", "Rows lacking Title dropped", rows=int(drop_title_n))
-                master_df = master_df.dropna(subset=["Title"])
+            # Remove rows without titles
+            if "Title" in master_df.columns:
+                drop_title_n = master_df["Title"].isna().sum()
+                if drop_title_n > 0:
+                    vc.add("Warning", "TITLE_MISSING", "Rows lacking Title dropped", rows=int(drop_title_n))
+                    master_df = master_df.dropna(subset=["Title"])
 
-        master_df["_lineage"] = "GSC→PROD→GA4"
+            master_df["_lineage"] = "GSC→PROD→GA4"
         
     except Exception as e:
         vc.add("Warning", "CLEANING_FAIL", f"Final cleaning failed: {e}")
 
     return master_df, vc
 
+# FIXED: Define vc_serialized before using it
+vc_serialized = rep_df.to_json(orient="records") if not rep_df.empty else "[]"
+
 # Process data with COMPLETE processing function
 with st.spinner("Processing & merging datasets..."):
     master_df, vc_after = process_uploaded_files_complete(
         prod_df_raw, ga4_df_raw, gsc_df_raw, 
         prod_map, ga4_map, gsc_map,
-        vc_serialized=vc_serialized, 
+        vc_serialized=vc_serialized,  # Now this variable is defined
         merge_strategy=MERGE_STRATEGY
     )
 
@@ -1111,7 +1113,7 @@ with st.expander("Data Summary", expanded=True):
 
 if step == "3) Validate & Process":
     st.success("Data processing complete! Move to **Step 4) Configure & Analyze** to generate insights.")
-    st.stop()    # ============================
+    st.stop()
 # PART 4/5: Core Analysis Modules
 # ============================
 
@@ -1568,4 +1570,5 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | Advanced SEO & Content Intelligence Platform")
+
 
