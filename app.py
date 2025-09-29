@@ -6,6 +6,7 @@ import os, io, re, sys, math, json, time, logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, date
+from math import sqrt
 
 import numpy as np
 import pandas as pd
@@ -76,6 +77,7 @@ _DEFAULT_CONFIG = {
         "Standard":     {"striking_distance_min": 11, "striking_distance_max": 20, "ctr_deficit_pct": 1.0, "similarity_threshold": 0.6, "min_impressions": 100, "min_clicks": 10},
         "Aggressive":   {"striking_distance_min": 8,  "striking_distance_max": 18, "ctr_deficit_pct": 0.5, "similarity_threshold": 0.5, "min_impressions": 50,  "min_clicks": 5}
     },
+    # Expected CTR curve for rank positions (1..9 provided; we’ll extrapolate beyond)
     "expected_ctr_by_rank": {1: 0.28, 2: 0.15, 3: 0.11, 4: 0.08, 5: 0.07, 6: 0.05, 7: 0.045, 8: 0.038, 9: 0.032},
     "performance": {"sample_row_limit": 350_000, "seed": 42},
     "defaults": {"date_lookback_days": 60}
@@ -90,7 +92,6 @@ def load_config():
                 try:
                     with open(candidate, "r", encoding="utf-8") as f:
                         user_cfg = yaml.safe_load(f) or {}
-                    # Deep merge for nested dictionaries
                     for k, v in user_cfg.items():
                         if isinstance(v, dict) and k in cfg and isinstance(cfg[k], dict):
                             cfg[k].update(v)
@@ -156,31 +157,26 @@ def log_event(event: str, **kws):
     logger.debug(f"[LOG] {event} | {kws}")
 
 def coerce_numeric(series, name: str, vc: ValidationCollector, clamp: Optional[Tuple[float, float]] = None) -> pd.Series:
-    """Safely convert series to numeric with validation logging"""
     if series is None or len(series) == 0:
         return pd.Series([], dtype=float)
-
     s = pd.to_numeric(series, errors="coerce")
     bad = s.isna().sum()
     if bad > 0:
         vc.add("Warning", "NUM_COERCE", f"Non-numeric values coerced to NaN in {name}", bad_rows=int(bad))
-
     if clamp and len(s) > 0:
         lo, hi = clamp
         s_clamped = s.copy()
-        out_of_bounds_mask = (s_clamped < lo) | (s_clamped > hi)
+        out_of_bounds_mask = ((s_clamped < lo) | (s_clamped > hi)) if hi is not None else (s_clamped < lo)
         before = out_of_bounds_mask.sum()
         if before > 0:
-            s_clamped.loc[out_of_bounds_mask] = s_clamped.clip(lo, hi)
+            s_clamped.loc[out_of_bounds_mask] = s_clamped.clip(lower=lo, upper=hi)
             vc.add("Info", "NUM_CLAMP", f"{name} clipped to bounds", lo=lo, hi=hi, affected=int(before))
             s = s_clamped
     return s
 
 def safe_dt_parse(col: pd.Series, name: str, vc: ValidationCollector) -> pd.Series:
-    """Safely parse datetime series with validation logging"""
     if col is None or len(col) == 0:
         return pd.Series([], dtype='datetime64[ns, UTC]')
-
     parsed = pd.to_datetime(col, errors="coerce", utc=True)
     bad = parsed.isna().sum()
     if bad > 0:
@@ -188,7 +184,6 @@ def safe_dt_parse(col: pd.Series, name: str, vc: ValidationCollector) -> pd.Seri
     return parsed
 
 def detect_date_cols(df: pd.DataFrame) -> List[str]:
-    """Detect potential date columns in dataframe"""
     if df is None or df.empty:
         return []
     return [c for c in df.columns if any(k in c.lower() for k in ["date", "dt", "time", "timestamp", "publish"])]
@@ -197,7 +192,6 @@ DEFAULT_VALIDATION_STRICTNESS = "Standard"
 MERGE_STRATEGY = {"gsc_x_prod": "left", "ga4_align": "left"}
 
 def add_lineage(df: pd.DataFrame, source: str) -> pd.DataFrame:
-    """Add data lineage information"""
     if df is None:
         return None
     df = df.copy()
@@ -206,7 +200,6 @@ def add_lineage(df: pd.DataFrame, source: str) -> pd.DataFrame:
 
 # Initialize session state
 def init_state_defaults():
-    """Initialize session state with defaults"""
     if "config" not in st.session_state:
         st.session_state.config = CONFIG
     if "thresholds" not in st.session_state:
@@ -226,7 +219,6 @@ init_state_defaults()
 # ============================
 
 def _make_template_production():
-    """Create production data template"""
     return pd.DataFrame({
         "Msid": [101, 102, 103],
         "Title": ["Budget 2025 highlights explained", "IPL 2025 schedule & squads", "Monsoon updates: city-by-city guide"],
@@ -235,7 +227,6 @@ def _make_template_production():
     })
 
 def _make_template_ga4():
-    """Create GA4 data template"""
     return pd.DataFrame({
         "customEvent:msid": [101, 101, 102, 102, 103],
         "date": ["2025-08-01", "2025-08-02", "2025-08-10", "2025-08-11", "2025-09-01"],
@@ -246,7 +237,6 @@ def _make_template_ga4():
     })
 
 def _make_template_gsc():
-    """Create GSC data template"""
     return pd.DataFrame({
         "Date": ["2025-08-01", "2025-08-02", "2025-08-10", "2025-08-11", "2025-09-01"],
         "Page": [
@@ -264,11 +254,9 @@ def _make_template_gsc():
     })
 
 def download_df_button(df: pd.DataFrame, filename: str, label: str):
-    """Create download button for dataframe"""
     if df is None or df.empty:
-        # st.warning(f"No data to download for {label}") # Can be noisy
+        st.warning(f"No data to download for {label}")
         return
-
     try:
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button(
@@ -282,34 +270,26 @@ def download_df_button(df: pd.DataFrame, filename: str, label: str):
         st.error(f"Failed to create download: {e}")
 
 def read_csv_safely(upload, name: str, vc: ValidationCollector, sample_rows: int = 1000) -> Optional[pd.DataFrame]:
-    """Safely read CSV with multiple encoding attempts"""
     if upload is None:
         vc.add("Critical", "NO_FILE", f"{name} file not provided")
         return None
-
     try_encodings = [None, "utf-8", "utf-8-sig", "latin-1", "cp1252"]
     last_err = None
-
     for enc in try_encodings:
         try:
             upload.seek(0)
             df = pd.read_csv(upload, encoding=enc) if enc else pd.read_csv(upload)
-
             if df.empty or df.shape[1] == 0:
                 vc.add("Critical", "EMPTY_CSV", f"{name} appears empty")
                 return None
-
             nullish_headers = sum(1 for c in df.columns if pd.isna(c) or str(c).strip().lower() in ("unnamed: 0", "", "nan"))
             if nullish_headers > 0:
                 vc.add("Warning", "HEADER_SUSPECT", f"{name} had unnamed/blank headers", count=int(nullish_headers))
-
             vc.checkpoint(f"{name}_read", rows=int(min(len(df), sample_rows)), cols=int(df.shape[1]), encoding=enc or "auto")
             return add_lineage(df, name)
-
         except Exception as e:
             last_err = e
             continue
-
     vc.add("Critical", "CSV_ENCODING", f"Failed to read {name} with common encodings", last_error=str(last_err))
     vc.add_exc(f"read_csv:{name}", last_err or Exception("Unknown encoding error"))
     return None
@@ -342,11 +322,9 @@ with st.sidebar:
     start_def, end_def = st.session_state.date_range
     start_date = st.date_input("Start Date", value=start_def)
     end_date = st.date_input("End Date", value=end_def)
-
     if start_date > end_date:
         st.warning("Start date is after end date. Swapping.")
         start_date, end_date = end_date, start_date
-
     st.session_state.date_range = (start_date, end_date)
 
     st.markdown("---")
@@ -375,8 +353,7 @@ step = st.radio("Steps", [
     "2) Upload & Map Columns",
     "3) Validate & Process",
     "4) Configure & Analyze"
-], horizontal=True, key="main_step")
-
+], horizontal=True)
 
 if step == "1) Get CSV Templates":
     st.info("Download sample CSV templates to understand required structure.")
@@ -405,68 +382,90 @@ with st.container():
     col1, col2, col3 = st.columns(3)
     with col1:
         prod_file = st.file_uploader("Production Data (CSV)", type=["csv"], key="prod_csv")
+        if prod_file:
+            st.success(f"✓ Production: {prod_file.name}")
     with col2:
         ga4_file = st.file_uploader("GA4 Data (CSV)", type=["csv"], key="ga4_csv")
+        if ga4_file:
+            st.success(f"✓ GA4: {ga4_file.name}")
     with col3:
         gsc_file = st.file_uploader("GSC Data (CSV)", type=["csv"], key="gsc_csv")
+        if gsc_file:
+            st.success(f"✓ GSC: {gsc_file.name}")
 
 if not all([prod_file, ga4_file, gsc_file]):
-    st.warning("Please upload all three CSV files to proceed.")
+    st.warning("Please upload all three CSV files to proceed")
     st.stop()
 
+# Read raw files
 vc_read = ValidationCollector()
 prod_df_raw = read_csv_safely(prod_file, "Production", vc_read)
 ga4_df_raw = read_csv_safely(ga4_file, "GA4", vc_read)
 gsc_df_raw = read_csv_safely(gsc_file, "GSC", vc_read)
-
 if any(df is None or df.empty for df in [prod_df_raw, ga4_df_raw, gsc_df_raw]):
     st.error("One or more uploaded files appear empty/unreadable. See Validation section below.")
     st.dataframe(vc_read.to_dataframe(), use_container_width=True, hide_index=True)
     st.stop()
-    # ============================
-# PART 3/5: Onboarding Steps, Mapping UI, Validation UI, Robust Processing
-# ============================
 
-def _guess_colmap(df, keywords):
-    for key, alts in keywords.items():
-        # Exact match first
-        for alt in alts:
-            if alt in df.columns:
-                return alt
-        # Then case-insensitive
-        for alt in alts:
-            for col in df.columns:
-                if alt.lower() == col.lower():
-                    return col
-        # Then partial match
-        for alt in alts:
-            for col in df.columns:
-                if alt.lower() in col.lower():
-                    return col
-    return None
+# Mapping helpers
+def _guess_colmap(prod_df, ga4_df, gsc_df):
+    if prod_df is None or ga4_df is None or gsc_df is None:
+        return {}, {}, {}
+    prod_map = {
+        "msid": "Msid" if "Msid" in prod_df.columns else next((c for c in prod_df.columns if c.lower() == "msid"), None),
+        "title": "Title" if "Title" in prod_df.columns else next((c for c in prod_df.columns if "title" in c.lower()), None),
+        "path": "Path" if "Path" in prod_df.columns else next((c for c in prod_df.columns if "path" in c.lower()), None),
+        "publish": "Publish Time" if "Publish Time" in prod_df.columns else next((c for c in prod_df.columns if "publish" in c.lower()), None),
+    }
+    ga4_map = {
+        "msid": "customEvent:msid" if "customEvent:msid" in ga4_df.columns else next((c for c in ga4_df.columns if "msid" in c.lower()), None),
+        "date": "date" if "date" in ga4_df.columns else next((c for c in ga4_df.columns if c.lower() == "date"), None),
+        "pageviews": "screenPageViews" if "screenPageViews" in ga4_df.columns else next((c for c in ga4_df.columns if "pageview" in c.lower()), None),
+        "users": "totalUsers" if "totalUsers" in ga4_df.columns else next((c for c in ga4_df.columns if "users" in c.lower()), None),
+        "engagement": "userEngagementDuration" if "userEngagementDuration" in ga4_df.columns else next((c for c in ga4_df.columns if "engagement" in c.lower()), None),
+        "bounce": "bounceRate" if "bounceRate" in ga4_df.columns else next((c for c in ga4_df.columns if "bounce" in c.lower()), None),
+    }
+    gsc_map = {
+        "date": "Date" if "Date" in gsc_df.columns else next((c for c in gsc_df.columns if c.lower() == "date"), None),
+        "page": "Page" if "Page" in gsc_df.columns else next((c for c in gsc_df.columns if "page" in c.lower()), None),
+        "query": "Query" if "Query" in gsc_df.columns else next((c for c in gsc_df.columns if "query" in c.lower()), None),
+        "clicks": "Clicks" if "Clicks" in gsc_df.columns else next((c for c in gsc_df.columns if "clicks" in c.lower()), None),
+        "impr": "Impressions" if "Impressions" in gsc_df.columns else next((c for c in gsc_df.columns if "impr" in c.lower()), None),
+        "ctr": "CTR" if "CTR" in gsc_df.columns else next((c for c in gsc_df.columns if "ctr" in c.lower()), None),
+        "pos": "Position" if "Position" in gsc_df.columns else next((c for c in gsc_df.columns if "position" in c.lower()), None),
+    }
+    return prod_map, ga4_map, gsc_map
 
 def guess_colmap_enhanced(prod_df, ga4_df, gsc_df):
-    prod_keywords = {"msid": ["msid"], "title": ["title"], "path": ["path", "url"], "publish": ["publish"]}
-    ga4_keywords = {"msid": ["msid"], "date": ["date"], "pageviews": ["pageview"], "users": ["user"], "engagement": ["engagement"], "bounce": ["bounce"]}
-    gsc_keywords = {"date": ["date"], "page": ["page"], "query": ["query"], "clicks": ["clicks"], "impr": ["impression"], "ctr": ["ctr"], "pos": ["position"]}
-    
-    prod_map = {k: _guess_colmap(prod_df, {k: v}) for k, v in prod_keywords.items()}
-    ga4_map = {k: _guess_colmap(ga4_df, {k: v}) for k, v in ga4_keywords.items()}
-    gsc_map = {k: _guess_colmap(gsc_df, {k: v}) for k, v in gsc_keywords.items()}
+    prod_map, ga4_map, gsc_map = _guess_colmap(prod_df, ga4_df, gsc_df)
+    if prod_df is not None:
+        prod_dates = [c for c in detect_date_cols(prod_df) if "publish" in c.lower() or "time" in c.lower()]
+        if prod_dates and not prod_map.get("publish"):
+            prod_map["publish"] = prod_dates[0]
+    if ga4_df is not None and not ga4_map.get("date"):
+        for c in detect_date_cols(ga4_df):
+            if c.lower() == "date":
+                ga4_map["date"] = c; break
+    if gsc_df is not None and not gsc_map.get("date"):
+        for c in detect_date_cols(gsc_df):
+            if c.lower() == "date":
+                gsc_map["date"] = c; break
     return prod_map, ga4_map, gsc_map
 
 def validate_columns_presence(prod_map, ga4_map, gsc_map, vc: ValidationCollector):
-    req = {"Production": ["msid"], "GA4": ["msid", "date"], "GSC": ["date", "page", "query", "clicks", "impr", "pos"]}
+    req_prod = ["msid"]
+    req_ga4 = ["msid"]
+    req_gsc = ["date", "page", "query", "clicks", "impr", "pos"]
     missing = []
-    for source, keys in req.items():
-        current_map = {"Production": prod_map, "GA4": ga4_map, "GSC": gsc_map}[source]
-        for k in keys:
-            if not current_map.get(k):
-                missing.append(f"{source}: {k}")
+    for k in req_prod:
+        if not prod_map.get(k): missing.append(f"Production: {k}")
+    for k in req_ga4:
+        if not ga4_map.get(k): missing.append(f"GA4: {k}")
+    for k in req_gsc:
+        if not gsc_map.get(k): missing.append(f"GSC: {k}")
     if missing:
-        vc.add("Critical", "MISSING_COLMAP", "Missing required column mappings", items=missing)
-    return not missing
-
+        vc.add("Critical", "MISSING_COLMAP", "Missing/ambiguous mappings for required columns", items=missing)
+    return missing
 
 if step == "2) Upload & Map Columns":
     prod_map_guess, ga4_map_guess, gsc_map_guess = guess_colmap_enhanced(prod_df_raw, ga4_df_raw, gsc_df_raw)
@@ -474,41 +473,68 @@ if step == "2) Upload & Map Columns":
     st.caption("We guessed likely columns. Adjust if needed.")
 
     with st.expander("Production Mapping", expanded=True):
-        prod_map = {
-            "msid": st.selectbox("MSID", prod_df_raw.columns, index=list(prod_df_raw.columns).index(prod_map_guess["msid"]) if prod_map_guess.get("msid") else 0),
-            "title": st.selectbox("Title", prod_df_raw.columns, index=list(prod_df_raw.columns).index(prod_map_guess["title"]) if prod_map_guess.get("title") else 1),
-            "path": st.selectbox("Path", prod_df_raw.columns, index=list(prod_df_raw.columns).index(prod_map_guess["path"]) if prod_map_guess.get("path") else 2),
-            "publish": st.selectbox("Publish Time", prod_df_raw.columns, index=list(prod_df_raw.columns).index(prod_map_guess["publish"]) if prod_map_guess.get("publish") else 3),
-        }
-    with st.expander("GA4 Mapping", expanded=True):
-        ga4_map = {
-            "msid": st.selectbox("MSID (GA4)", ga4_df_raw.columns, index=list(ga4_df_raw.columns).index(ga4_map_guess["msid"]) if ga4_map_guess.get("msid") else 0),
-            "date": st.selectbox("Date (GA4)", ga4_df_raw.columns, index=list(ga4_df_raw.columns).index(ga4_map_guess["date"]) if ga4_map_guess.get("date") else 1),
-            "pageviews": st.selectbox("Pageviews", ga4_df_raw.columns, index=list(ga4_df_raw.columns).index(ga4_map_guess["pageviews"]) if ga4_map_guess.get("pageviews") else 2),
-            "users": st.selectbox("Users", ga4_df_raw.columns, index=list(ga4_df_raw.columns).index(ga4_map_guess["users"]) if ga4_map_guess.get("users") else 3),
-            "engagement": st.selectbox("Engagement", ga4_df_raw.columns, index=list(ga4_df_raw.columns).index(ga4_map_guess["engagement"]) if ga4_map_guess.get("engagement") else 4),
-            "bounce": st.selectbox("Bounce Rate", ga4_df_raw.columns, index=list(ga4_df_raw.columns).index(ga4_map_guess["bounce"]) if ga4_map_guess.get("bounce") else 5),
-        }
-    with st.expander("GSC Mapping", expanded=True):
-        gsc_map = {
-            "date": st.selectbox("Date (GSC)", gsc_df_raw.columns, index=list(gsc_df_raw.columns).index(gsc_map_guess["date"]) if gsc_map_guess.get("date") else 0),
-            "page": st.selectbox("Page URL", gsc_df_raw.columns, index=list(gsc_df_raw.columns).index(gsc_map_guess["page"]) if gsc_map_guess.get("page") else 1),
-            "query": st.selectbox("Query", gsc_df_raw.columns, index=list(gsc_df_raw.columns).index(gsc_map_guess["query"]) if gsc_map_guess.get("query") else 2),
-            "clicks": st.selectbox("Clicks", gsc_df_raw.columns, index=list(gsc_df_raw.columns).index(gsc_map_guess["clicks"]) if gsc_map_guess.get("clicks") else 3),
-            "impr": st.selectbox("Impressions", gsc_df_raw.columns, index=list(gsc_df_raw.columns).index(gsc_map_guess["impr"]) if gsc_map_guess.get("impr") else 4),
-            "ctr": st.selectbox("CTR", gsc_df_raw.columns, index=list(gsc_df_raw.columns).index(gsc_map_guess["ctr"]) if gsc_map_guess.get("ctr") else 5),
-            "pos": st.selectbox("Position", gsc_df_raw.columns, index=list(gsc_df_raw.columns).index(gsc_map_guess["pos"]) if gsc_map_guess.get("pos") else 6),
-        }
+        c1, c2, c3, c4 = st.columns(4)
+        prod_map = {}
+        prod_map["msid"] = c1.selectbox("MSID", prod_df_raw.columns,
+            index=prod_df_raw.columns.get_loc(prod_map_guess["msid"]) if prod_map_guess.get("msid") in prod_df_raw.columns else 0)
+        prod_map["title"] = c2.selectbox("Title", prod_df_raw.columns,
+            index=prod_df_raw.columns.get_loc(prod_map_guess["title"]) if prod_map_guess.get("title") in prod_df_raw.columns else 0)
+        prod_map["path"] = c3.selectbox("Path", prod_df_raw.columns,
+            index=prod_df_raw.columns.get_loc(prod_map_guess["path"]) if prod_map_guess.get("path") in prod_df_raw.columns else 0)
+        prod_map["publish"] = c4.selectbox("Publish Time", prod_df_raw.columns,
+            index=prod_df_raw.columns.get_loc(prod_map_guess["publish"]) if prod_map_guess.get("publish") in prod_df_raw.columns else 0)
 
-    vc_map = ValidationCollector()
-    if validate_columns_presence(prod_map, ga4_map, gsc_map, vc_map):
+    with st.expander("GA4 Mapping", expanded=True):
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        ga4_map = {}
+        ga4_map["msid"] = c1.selectbox("MSID (GA4)", ga4_df_raw.columns,
+            index=ga4_df_raw.columns.get_loc(ga4_map_guess["msid"]) if ga4_map_guess.get("msid") in ga4_df_raw.columns else 0)
+        ga4_map["date"] = c2.selectbox("Date (GA4)", ga4_df_raw.columns,
+            index=ga4_df_raw.columns.get_loc(ga4_map_guess["date"]) if ga4_map_guess.get("date") in ga4_df_raw.columns else 0)
+        ga4_map["pageviews"] = c3.selectbox("Pageviews", ga4_df_raw.columns,
+            index=ga4_df_raw.columns.get_loc(ga4_map_guess["pageviews"]) if ga4_map_guess.get("pageviews") in ga4_df_raw.columns else 0)
+        ga4_map["users"] = c4.selectbox("Users", ga4_df_raw.columns,
+            index=ga4_df_raw.columns.get_loc(ga4_map_guess["users"]) if ga4_map_guess.get("users") in ga4_df_raw.columns else 0)
+        ga4_map["engagement"] = c5.selectbox("Engagement Duration", ga4_df_raw.columns,
+            index=ga4_df_raw.columns.get_loc(ga4_map_guess["engagement"]) if ga4_map_guess.get("engagement") in ga4_df_raw.columns else 0)
+        ga4_map["bounce"] = c6.selectbox("Bounce Rate", ga4_df_raw.columns,
+            index=ga4_df_raw.columns.get_loc(ga4_map_guess["bounce"]) if ga4_map_guess.get("bounce") in ga4_df_raw.columns else 0)
+
+    with st.expander("GSC Mapping", expanded=True):
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+        gsc_map = {}
+        gsc_map["date"] = c1.selectbox("Date (GSC)", gsc_df_raw.columns,
+            index=gsc_df_raw.columns.get_loc(gsc_map_guess["date"]) if gsc_map_guess.get("date") in gsc_df_raw.columns else 0)
+        gsc_map["page"] = c2.selectbox("Page URL", gsc_df_raw.columns,
+            index=gsc_df_raw.columns.get_loc(gsc_map_guess["page"]) if gsc_map_guess.get("page") in gsc_df_raw.columns else 0)
+        gsc_map["query"] = c3.selectbox("Query", gsc_df_raw.columns,
+            index=gsc_df_raw.columns.get_loc(gsc_map_guess["query"]) if gsc_map_guess.get("query") in gsc_df_raw.columns else 0)
+        gsc_map["clicks"] = c4.selectbox("Clicks", gsc_df_raw.columns,
+            index=gsc_df_raw.columns.get_loc(gsc_map_guess["clicks"]) if gsc_map_guess.get("clicks") in gsc_df_raw.columns else 0)
+        gsc_map["impr"] = c5.selectbox("Impressions", gsc_df_raw.columns,
+            index=gsc_df_raw.columns.get_loc(gsc_map_guess["impr"]) if gsc_map_guess.get("impr") in gsc_df_raw.columns else 0)
+        gsc_map["ctr"] = c6.selectbox("CTR", gsc_df_raw.columns,
+            index=gsc_df_raw.columns.get_loc(gsc_map_guess["ctr"]) if gsc_map_guess.get("ctr") in gsc_df_raw.columns else 0)
+        gsc_map["pos"] = c7.selectbox("Position", gsc_df_raw.columns,
+            index=gsc_df_raw.columns.get_loc(gsc_map_guess["pos"]) if gsc_map_guess.get("pos") in gsc_df_raw.columns else 0)
+
+    missing = validate_columns_presence(prod_map, ga4_map, gsc_map, vc_read)
+    rep_df = vc_read.to_dataframe()
+
+    if not rep_df.empty:
+        st.markdown("**Preliminary Reader/Mapping Warnings**")
+        st.dataframe(rep_df, use_container_width=True, hide_index=True)
+
+    if missing:
+        st.error("Critical mapping issues detected. Please fix before proceeding.")
+    else:
         st.session_state.mapping = {"prod": prod_map, "ga4": ga4_map, "gsc": gsc_map}
         st.success("Column mapping saved. Proceed to **Step 3**.")
-    else:
-        st.error("Critical mapping issues detected. Please fix before proceeding.")
-        st.dataframe(vc_map.to_dataframe())
-    st.stop()
 
+    st.stop()
+# ============================
+# PART 3/5: Validation UI, Robust Processing & Post-merge
+# ============================
 
 if "mapping" not in st.session_state:
     st.warning("Please complete **Step 2** (column mapping) first.")
@@ -518,309 +544,725 @@ prod_map = st.session_state.mapping["prod"]
 ga4_map = st.session_state.mapping["ga4"]
 gsc_map = st.session_state.mapping["gsc"]
 
-@st.cache_data(show_spinner="Processing and merging datasets...")
-def process_uploaded_files_complete(_prod_df_raw, _ga4_df_raw, _gsc_df_raw, prod_map, ga4_map, gsc_map, merge_strategy):
+def run_validation_pipeline(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map):
     vc = ValidationCollector()
-    prod_df = _prod_df_raw.copy()
-    ga4_df = _ga4_df_raw.copy()
-    gsc_df = _gsc_df_raw.copy()
+    missing_map = validate_columns_presence(prod_map, ga4_map, gsc_map, vc)
 
-    # Rename
-    std_names = { "prod": {"msid": "msid", "title": "Title", "path": "Path", "publish": "PublishTime"}, "ga4": {"msid": "msid", "date": "date", "pageviews": "screenPageViews", "users": "totalUsers", "engagement": "userEngagementDuration", "bounce": "bounceRate"}, "gsc": {"date": "date", "page": "page_url", "query": "Query", "clicks": "Clicks", "impr": "Impressions", "ctr": "CTR", "pos": "Position"} }
+    for name, df in [("Production", prod_df_raw), ("GA4", ga4_df_raw), ("GSC", gsc_df_raw)]:
+        if df is None or df.empty:
+            vc.add("Critical", "EMPTY_FILE", f"{name} is empty or unreadable")
+            continue
+        if df.shape[1] < 2:
+            vc.add("Critical", "TOO_FEW_COLS", f"{name} has too few cols", cols=int(df.shape[1]))
+        if df.duplicated().any():
+            vc.add("Info", "DUP_ROWS", f"{name} contained fully duplicated rows", rows=int(df.duplicated().sum()))
+        cand = detect_date_cols(df)
+        if cand:
+            vc.add("Info", "DATE_CANDIDATES", f"Possible date columns in {name}", columns=cand[:6])
+
     try:
-        prod_df.rename(columns={prod_map[k]: v for k, v in std_names["prod"].items() if prod_map.get(k)}, inplace=True)
-        ga4_df.rename(columns={ga4_map[k]: v for k, v in std_names["ga4"].items() if ga4_map.get(k)}, inplace=True)
-        gsc_df.rename(columns={gsc_map[k]: v for k, v in std_names["gsc"].items() if gsc_map.get(k)}, inplace=True)
+        if prod_df_raw is not None and gsc_df_raw is not None:
+            p_m = set(pd.to_numeric(prod_df_raw[prod_map["msid"]], errors="coerce").dropna().astype("int64"))
+            def msid_from_url(u):
+                if isinstance(u, str):
+                    m = re.search(r"(\d+)\.cms", u)
+                    return int(m.group(1)) if m else None
+                return None
+            g_m = set(pd.to_numeric(gsc_df_raw[gsc_map["page"]].apply(msid_from_url), errors="coerce").dropna().astype("int64"))
+            only_p, only_g = len(p_m - g_m), len(g_m - p_m)
+            if only_p: vc.add("Info", "MSID_ONLY_PROD", "MSIDs appear only in Production", count=int(only_p))
+            if only_g: vc.add("Warning", "MSID_ONLY_GSC", "MSIDs appear only in GSC", count=int(only_g))
     except Exception as e:
-        vc.add("Critical", "RENAME_FAIL", f"Failed column renaming: {e}")
+        vc.add_exc("preview_msid_consistency", e)
+    return vc
+
+st.subheader("Data Validation Report")
+vc0 = run_validation_pipeline(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map)
+rep_df = vc0.to_dataframe()
+
+if rep_df.empty:
+    st.success("No issues detected in preliminary checks ✅")
+else:
+    tabs = st.tabs(["Critical", "Warning", "Info"])
+    for i, cat in enumerate(["Critical", "Warning", "Info"]):
+        with tabs[i]:
+            sub = rep_df[rep_df["category"] == cat]
+            if not sub.empty:
+                st.dataframe(sub, use_container_width=True, hide_index=True)
+            else:
+                st.info(f"No {cat} issues")
+    st.caption(f"Data Quality Score (pre-processing): **{vc0.quality_score():.0f} / 100**")
+    st.download_button(
+        "Download Validation Report (CSV)",
+        data=rep_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"validation_report_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
+
+def standardize_dates_early(prod_df, ga4_df, gsc_df, mappings, vc: ValidationCollector):
+    def _ensure_utc(ts: pd.Timestamp) -> pd.Timestamp:
+        if pd.isna(ts): return ts
+        try: return ts.tz_convert("UTC")
+        except:
+            try: return ts.tz_localize("UTC")
+            except: return ts
+
+    def normalize_date_only(df, col_name, out_name):
+        if df is not None and col_name in df.columns:
+            dt = safe_dt_parse(df[col_name], col_name, vc)
+            df[out_name] = dt.dt.date
+            if dt.notna().any():
+                maxd, mind = dt.max(), dt.min()
+                if pd.notna(maxd) and _ensure_utc(maxd) > pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1):
+                    vc.add("Warning", "FUTURE_DATE", f"{out_name} has future dates", sample=str(maxd))
+                if pd.notna(mind) and _ensure_utc(mind) < pd.Timestamp(2020, 1, 1, tz="UTC"):
+                    vc.add("Info", "OLD_DATE", f"{out_name} includes <2020 dates", earliest=str(mind))
+
+    p = prod_df.copy() if prod_df is not None else None
+    if p is not None and mappings["prod"].get("publish"):
+        p["Publish Time"] = safe_dt_parse(p[mappings["prod"]["publish"]], "Publish Time", vc)
+
+    g4 = ga4_df.copy() if ga4_df is not None else None
+    if g4 is not None and mappings["ga4"].get("date"):
+        normalize_date_only(g4, mappings["ga4"]["date"], "date")
+
+    gs = gsc_df.copy() if gsc_df is not None else None
+    if gs is not None and mappings["gsc"].get("date"):
+        normalize_date_only(gs, mappings["gsc"]["date"], "date")
+
+    return p, g4, gs
+
+@st.cache_data(show_spinner=False, max_entries=3)
+def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map,
+                                   vc_serialized: Optional[str] = None,
+                                   merge_strategy: Optional[Dict[str, str]] = None):
+    vc = ValidationCollector()
+    if vc_serialized:
+        try:
+            messages = json.loads(vc_serialized)
+            for item in messages:
+                ctx = item.get("context", {})
+                if isinstance(ctx, str):
+                    try: ctx = json.loads(ctx)
+                    except: ctx = {}
+                vc.add(item["category"], item["code"], item["message"], **ctx)
+        except Exception as e:
+            vc.add("Warning", "VC_LOAD_FAIL", f"Failed to load previous validation: {e}")
+
+    ms = merge_strategy or MERGE_STRATEGY
+    prod_df = prod_df_raw.copy() if prod_df_raw is not None else None
+    ga4_df = ga4_df_raw.copy() if ga4_df_raw is not None else None
+    gsc_df = gsc_df_raw.copy() if gsc_df_raw is not None else None
+
+    # 1) Rename to standard names
+    std_names = {
+        "prod": {"msid": "msid", "title": "Title", "path": "Path", "publish": "Publish Time"},
+        "ga4": {"msid": "msid", "date": "date", "pageviews": "screenPageViews", "users": "totalUsers", "engagement": "userEngagementDuration", "bounce": "bounceRate"},
+        "gsc": {"date": "date", "page": "page_url", "query": "Query", "clicks": "Clicks", "impr": "Impressions", "ctr": "CTR", "pos": "Position"}
+    }
+    try:
+        if prod_df is not None: prod_df.rename(columns={prod_map[k]: v for k, v in std_names["prod"].items() if prod_map.get(k)}, inplace=True)
+        if ga4_df is not None: ga4_df.rename(columns={ga4_map[k]: v for k, v in std_names["ga4"].items() if ga4_map.get(k)}, inplace=True)
+        if gsc_df is not None: gsc_df.rename(columns={gsc_map[k]: v for k, v in std_names["gsc"].items() if gsc_map.get(k)}, inplace=True)
+    except Exception as e:
+        vc.add("Critical", "RENAME_FAIL", f"Failed during column renaming: {e}")
         return None, vc
 
-    # Standardize Dates & MSIDs
-    for df, name in [(ga4_df, "GA4"), (gsc_df, "GSC")]:
-        if "date" in df.columns: df["date"] = safe_dt_parse(df["date"], f"{name}.date", vc)
-    if "msid" not in gsc_df.columns and "page_url" in gsc_df.columns:
-        gsc_df["msid"] = gsc_df["page_url"].str.extract(r'(\d+)\.cms').iloc[:, 0]
-    for df, name in [(prod_df, "Prod"), (ga4_df, "GA4"), (gsc_df, "GSC")]:
-        if "msid" in df.columns:
-            df["msid"] = coerce_numeric(df["msid"], f"{name}.msid", vc)
+    # 2) Early date & msid standardization
+    prod_df, ga4_df, gsc_df = standardize_dates_early(prod_df, ga4_df, gsc_df, {"prod": std_names["prod"], "ga4": std_names["ga4"], "gsc": std_names["gsc"]}, vc)
+
+    for df, name in [(prod_df, "Production"), (ga4_df, "GA4")]:
+        if df is not None and "msid" in df.columns:
+            df["msid"] = pd.to_numeric(df["msid"], errors="coerce")
+            if df["msid"].isna().any(): vc.add("Warning", "MSID_BAD", f"Non-numeric MSIDs in {name}", count=int(df['msid'].isna().sum()))
             df.dropna(subset=["msid"], inplace=True)
             if not df.empty: df["msid"] = df["msid"].astype("int64")
 
-    # Coerce Numerics
-    for col in ["screenPageViews", "totalUsers", "userEngagementDuration", "bounceRate"]:
-        if col in ga4_df.columns: ga4_df[col] = coerce_numeric(ga4_df[col], f"GA4.{col}", vc)
-    for col in ["Clicks", "Impressions", "CTR", "Position"]:
-        if col in gsc_df.columns: gsc_df[col] = coerce_numeric(gsc_df[col], f"GSC.{col}", vc)
+    if gsc_df is not None and "page_url" in gsc_df.columns:
+        gsc_df["msid"] = gsc_df["page_url"].str.extract(r'(\d+)\.cms').iloc[:, 0]
+        gsc_df["msid"] = pd.to_numeric(gsc_df["msid"], errors="coerce")
+        if gsc_df["msid"].isna().any(): vc.add("Warning", "MSID_EXTRACT_FAIL", "Could not extract MSID from some GSC URLs", count=int(gsc_df['msid'].isna().sum()))
+        gsc_df.dropna(subset=["msid"], inplace=True)
+        if not gsc_df.empty: gsc_df["msid"] = gsc_df["msid"].astype("int64")
 
-    # Merge
+    # 3) Robust numeric conversion
+    if gsc_df is not None:
+        for col, clamp in [("Clicks", (0, None)), ("Impressions", (0, None)), ("Position", (1, 100))]:
+            if col in gsc_df.columns:
+                gsc_df[col] = coerce_numeric(gsc_df[col], f"GSC.{col}", vc, clamp=clamp)
+        if "CTR" in gsc_df.columns:
+            if gsc_df["CTR"].dtype == 'object' and gsc_df["CTR"].astype(str).str.contains('%').any():
+                gsc_df["CTR"] = pd.to_numeric(gsc_df["CTR"].astype(str).str.replace('%', ''), errors='coerce') / 100.0
+            gsc_df["CTR"] = coerce_numeric(gsc_df["CTR"], "GSC.CTR", vc, clamp=(0, 1))
+        elif "Clicks" in gsc_df.columns and "Impressions" in gsc_df.columns:
+            vc.add("Info", "CTR_CALCULATED", "CTR column calculated from Clicks/Impressions")
+            gsc_df["CTR"] = (gsc_df["Clicks"] / gsc_df["Impressions"].replace(0, np.nan)).fillna(0)
+
+    if ga4_df is not None:
+        for col in ["screenPageViews", "totalUsers", "userEngagementDuration", "bounceRate"]:
+            if col in ga4_df.columns:
+                ga4_df[col] = coerce_numeric(ga4_df[col], f"GA4.{col}", vc)
+
+    # 4) Merge
     if gsc_df is None or prod_df is None or gsc_df.empty or prod_df.empty:
-        vc.add("Critical", "MERGE_FAIL", "Cannot merge due to missing GSC or Production data.")
+        vc.add("Critical", "MERGE_PREP_FAIL", "Cannot merge due to missing GSC or Production data.")
         return None, vc
-    
-    prod_cols = [c for c in ["msid", "Title", "Path", "PublishTime"] if c in prod_df.columns]
-    merged_1 = pd.merge(gsc_df, prod_df[prod_cols].drop_duplicates(subset=["msid"]), on="msid", how=merge_strategy["gsc_x_prod"])
-    
+
+    prod_cols = [c for c in ["msid", "Title", "Path", "Publish Time"] if c in prod_df.columns]
+    merged_1 = pd.merge(gsc_df, prod_df[prod_cols].drop_duplicates(subset=["msid"]), on="msid", how=ms.get("gsc_x_prod", "left"))
+    vc.checkpoint("merge_gsc_prod", after_m1=len(merged_1))
+
     if ga4_df is not None and not ga4_df.empty and "date" in ga4_df.columns:
         numeric_cols = [c for c in ["screenPageViews", "totalUsers", "userEngagementDuration", "bounceRate"] if c in ga4_df.columns]
-        ga4_daily = ga4_df.groupby(["msid", pd.Grouper(key="date", freq="D")]).agg({k: "sum" for k in numeric_cols}).reset_index()
-        master_df = pd.merge(merged_1, ga4_daily, on=["msid", "date"], how=merge_strategy["ga4_align"])
+        ga4_daily = ga4_df.groupby(["msid", "date"], as_index=False)[numeric_cols].sum(min_count=1)
+        master_df = pd.merge(merged_1, ga4_daily, on=["msid", "date"], how=ms.get("ga4_align", "left"))
     else:
         master_df = merged_1
-        vc.add("Info", "NO_GA4_MERGE", "GA4 data not available for merge")
+        vc.add("Info", "NO_GA4_MERGE", "GA4 data not available or missing 'date' for merge")
+    vc.checkpoint("merge_ga4", after_master=len(master_df))
 
-    # Final Cleaning
-    if "Path" in master_df.columns:
-        cats = master_df["Path"].str.strip('/').str.split('/', n=1, expand=True)
-        master_df["L1_Category"] = cats[0].fillna("Uncategorized")
-        master_df["L2_Category"] = cats[1].fillna("General")
+    # 5) Final cleaning & features
+    if master_df is not None and not master_df.empty:
+        if "Path" in master_df.columns:
+            cats = master_df["Path"].str.strip('/').str.split('/', n=2, expand=True)
+            master_df["L1_Category"] = cats[0].fillna("Uncategorized")
+            master_df["L2_Category"] = cats[1].fillna("General")
+        else:
+            master_df["L1_Category"] = "Uncategorized"
+            master_df["L2_Category"] = "General"
+
+        if "Title" in master_df.columns:
+            drop_n = master_df["Title"].isna().sum()
+            if drop_n > 0:
+                vc.add("Warning", "TITLE_MISSING", "Rows lacking Title dropped", rows=int(drop_n))
+                master_df.dropna(subset=["Title"], inplace=True)
+
+        master_df["_lineage"] = "GSC→PROD→GA4"
 
     return master_df, vc
 
-master_df, vc_after = process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map, MERGE_STRATEGY)
+# --- RUN PROCESSING ---
+vc_serialized = rep_df.to_json(orient="records") if not rep_df.empty else "[]"
+with st.spinner("Processing & merging datasets... This may take a moment."):
+    master_df, vc_after = process_uploaded_files_complete(
+        prod_df_raw, ga4_df_raw, gsc_df_raw,
+        prod_map, ga4_map, gsc_map,
+        vc_serialized=vc_serialized,
+        merge_strategy=MERGE_STRATEGY
+    )
 
 if master_df is None or master_df.empty:
-    st.error("Data processing failed critically.")
-    st.dataframe(vc_after.to_dataframe())
+    st.error("Data processing failed critically. Please check the validation report and your file mappings.")
+    if vc_after:
+        st.dataframe(vc_after.to_dataframe(), use_container_width=True, hide_index=True)
     st.stop()
+
+# Post-merge validation report
+st.subheader("Post-merge Data Quality")
+post_df = vc_after.to_dataframe()
+if not post_df.empty:
+    st.dataframe(post_df, use_container_width=True, hide_index=True)
+    st.caption(f"Data Quality Score (post-merge): **{vc_after.quality_score():.0f} / 100**")
+    st.download_button(
+        "Download Post-merge Report (CSV)",
+        data=post_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"postmerge_report_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
 
 st.success(f"✅ Master dataset created: {master_df.shape[0]:,} rows × {master_df.shape[1]} columns")
 
-if step != "4) Configure & Analyze":
-    st.subheader("Data Preview")
-    st.dataframe(master_df.head())
-    st.info("Processing complete. Proceed to the 'Configure & Analyze' step to view insights.")
+if "date" in master_df.columns:
+    try:
+        date_col = pd.to_datetime(master_df["date"], errors="coerce")
+        if date_col.notna().any():
+            min_date, max_date = date_col.min().date(), date_col.max().date()
+            st.caption(f"Date range in master data: **{min_date}** to **{max_date}**")
+    except Exception:
+        pass
+
+if master_df.shape[0] > CONFIG["performance"]["sample_row_limit"]:
+    st.info(f"Large dataset detected. For interactive analysis, a sample of {CONFIG['performance']['sample_row_limit']:,} rows will be used.")
+    analysis_df = master_df.sample(
+        n=CONFIG["performance"]["sample_row_limit"],
+        random_state=CONFIG["performance"]["seed"]
+    )
+else:
+    analysis_df = master_df
+
+st.subheader("Data Preview (First 10 rows)")
+st.dataframe(master_df.head(10), use_container_width=True, hide_index=True)
+
+with st.expander("Data Summary", expanded=True):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Rows", f"{len(master_df):,}")
+    with col2:
+        st.metric("Total Columns", f"{len(master_df.columns)}")
+    with col3:
+        if "msid" in master_df.columns:
+            st.metric("Unique Articles", f"{master_df['msid'].nunique():,}")
+
+if step == "3) Validate & Process":
+    st.success("Data processing complete! Move to **Step 4) Configure & Analyze** to generate insights.")
     st.stop()
-    # ============================
-# PART 4/5: Core Analysis Modules (MODIFIED)
+# ============================
+# PART 4/5: Core Analysis Modules
 # ============================
 
 # Date filtering
-start_date, end_date = pd.to_datetime(st.session_state.date_range[0]), pd.to_datetime(st.session_state.date_range[1])
-master_df['date'] = pd.to_datetime(master_df['date'], utc=True)
-filtered_df = master_df[(master_df['date'] >= start_date) & (master_df['date'] <= end_date)].copy()
-st.info(f"Analyzing {len(filtered_df):,} rows from {st.session_state.date_range[0]} to {st.session_state.date_range[1]}")
-
-
-def run_module_safely(label: str, fn, *args, **kwargs):
+def filter_by_date(df, start_date, end_date):
+    if df is None or df.empty or "date" not in df.columns:
+        return df
+    df_copy = df.copy()
     try:
-        with st.spinner(f"Running {label}..."):
-            return fn(*args, **kwargs)
+        df_copy["date"] = pd.to_datetime(df_copy["date"], errors="coerce").dt.date
+        mask = (df_copy["date"] >= start_date) & (df_copy["date"] <= end_date)
+        filtered = df_copy[mask].copy()
+        st.info(f"Date filter applied: {len(filtered):,} rows from {start_date} to {end_date}")
+        return filtered
     except Exception as e:
-        st.warning(f"Module '{label}' failed: {e}")
-        logger.error(f"Module fail: {label}", exc_info=True)
-        return None
+        st.warning(f"Date filtering failed: {e}")
+        return df_copy
 
-# NEW: Function to generate a downloadable opportunities file
-def identify_opportunities(df):
-    """Identifies various opportunities and returns them as a single DataFrame."""
-    opportunities = []
-    df_agg = df.groupby('msid').agg({
-        'Position': 'mean', 'CTR': 'mean', 'userEngagementDuration': 'mean',
-        'bounceRate': 'mean', 'Title': 'first', 'Clicks': 'sum', 'Impressions': 'sum'
-    }).reset_index()
+# Apply date filter
+start_date, end_date = st.session_state.date_range
+filtered_df = filter_by_date(analysis_df, start_date, end_date)
 
-    # Hidden Gems: High engagement, poor position
-    if 'userEngagementDuration' in df_agg.columns:
-        gems = df_agg[(df_agg['userEngagementDuration'] > df_agg['userEngagementDuration'].quantile(0.75)) & (df_agg['Position'] > 15)].copy()
-        if not gems.empty:
-            gems['opportunity_type'] = 'Hidden Gem (High Engagement, Poor Position)'
-            opportunities.append(gems)
-
-    # Low CTR at Good Position
-    low_ctr = df_agg[(df_agg['Position'] <= 10) & (df_agg['CTR'] < 0.03) & (df_agg['Impressions'] > 100)].copy()
-    if not low_ctr.empty:
-        low_ctr['opportunity_type'] = 'Low CTR at Good Position'
-        opportunities.append(low_ctr)
-
-    # High Bounce Rate at Good Position
-    if 'bounceRate' in df_agg.columns:
-        high_bounce = df_agg[(df_agg['Position'] <= 15) & (df_agg['bounceRate'] > 0.7)].copy()
-        if not high_bounce.empty:
-            high_bounce['opportunity_type'] = 'High Bounce Rate at Good Position'
-            opportunities.append(high_bounce)
-
-    if not opportunities:
-        return pd.DataFrame()
-    return pd.concat(opportunities).drop_duplicates(subset=['msid'])
-
-# MODIFIED: Reworked scatter plot to be cleaner and more insightful
-def scatter_engagement_vs_search(df):
-    """Create a cleaner scatter plot with highlighted performance quadrants."""
-    eng_col = _pick_col(df, ["userEngagementDuration", "totalUsers"])
-    pos_col = "Position"
-    size_col = _pick_col(df, ["Clicks", "screenPageViews"])
-
-    if not all([eng_col, pos_col, size_col]):
-        st.info("Insufficient data for Engagement vs. Search scatter plot.")
-        return
-
-    plot_data = df.groupby('msid').agg({
-        pos_col: 'mean', eng_col: 'mean', size_col: 'sum', 'L1_Category': 'first', 'Title': 'first'
-    }).dropna().reset_index()
-
-    if plot_data.empty: return
-
-    median_eng = plot_data[eng_col].median()
-    median_pos = plot_data[pos_col].median()
-
-    def assign_quadrant(row):
-        high_eng = row[eng_col] >= median_eng
-        good_pos = row[pos_col] <= median_pos
-        if high_eng and good_pos: return "Stars"
-        if high_eng and not good_pos: return "Hidden Gems"
-        if not high_eng and good_pos: return "Workhorses"
-        return "Underperformers"
-
-    plot_data['quadrant'] = plot_data.apply(assign_quadrant, axis=1)
-
-    fig = px.scatter(
-        plot_data, x=pos_col, y=eng_col, size=size_col, color="quadrant",
-        hover_data=["Title"], title="Engagement vs. Search Performance Quadrants",
-        labels={pos_col: "Avg. Search Position (Lower is Better)", eng_col: f"Avg. {eng_col} (Higher is Better)"},
-        category_orders={"quadrant": ["Stars", "Hidden Gems", "Workhorses", "Underperformers"]},
-        color_discrete_map={"Stars": "green", "Hidden Gems": "orange", "Workhorses": "blue", "Underperformers": "rgba(128,128,128,0.5)"},
-        size_max=60
-    )
-    fig.add_vline(x=median_pos, line_dash="dash", line_color="grey", annotation_text="Median Position")
-    fig.add_hline(y=median_eng, line_dash="dash", line_color="grey", annotation_text="Median Engagement")
-    fig.update_layout(xaxis_autorange="reversed")
-    st.plotly_chart(fig, use_container_width=True)
+TH = st.session_state.thresholds
+EXPECTED_CTR = CONFIG["expected_ctr_by_rank"]
 
 def _pick_col(df, candidates):
-    for c in candidates:
-        if c in df.columns: return c
+    if df is None: return None
+    for candidate in candidates:
+        if candidate in df.columns: return candidate
     return None
 
-def forecast_series(daily_series, periods=14):
-    if daily_series is None or len(daily_series) < 14 or not _HAS_STM: return None
+def _expected_ctr_for_pos(pos: float) -> float:
+    """Extrapolate expected CTR for a given average position."""
+    if pd.isna(pos): return np.nan
+    p = max(1, min(50, float(pos)))
+    base = EXPECTED_CTR.get(int(min(9, round(p))), EXPECTED_CTR[9])
+    if p <= 9:
+        return base
+    # gentle decay beyond rank 9
+    return base * (9.0 / p) ** 0.5
+
+def engagement_mismatches(df):
+    """Card-style insights (unchanged logic for short, human-friendly takeaways)."""
+    if df is None or df.empty:
+        return ["No data available for analysis"]
+    d = df.copy()
+    insights = []
+    if "Position" in d.columns and "CTR" in d.columns:
+        pos_ctr_data = d[["msid", "Position", "CTR", "Title"]].dropna()
+        if not pos_ctr_data.empty:
+            good_pos_low_ctr = pos_ctr_data[(pos_ctr_data["Position"] <= 10) & (pos_ctr_data["CTR"] < 0.03)]
+            for _, row in good_pos_low_ctr.head(2).iterrows():
+                insights.append(f"""### ⚠️ Low CTR at Good Position
+**MSID:** `{row.get('msid', 'N/A')}` | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
+**Title:** {str(row.get('Title', 'Unknown'))[:80]}...
+**Recommendation:** Test more compelling titles and meta descriptions to convert high visibility into more clicks.""")
+            high_ctr_poor_position = pos_ctr_data[(pos_ctr_data["Position"] > 15) & (pos_ctr_data["CTR"] > 0.05)]
+            for _, row in high_ctr_poor_position.head(2).iterrows():
+                insights.append(f"""### 💎 High CTR at Poor Position (Hidden Gem)
+**MSID:** `{row.get('msid', 'N/A')}` | **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}
+**Title:** {str(row.get('Title', 'Unknown'))[:80]}...
+**Recommendation:** This content resonates well. Invest in on-page SEO and link building to improve its ranking.""")
+    if "bounceRate" in d.columns and "Position" in d.columns:
+        bounce_data = d[["msid", "bounceRate", "Title", "Position"]].dropna()
+        if not bounce_data.empty:
+            high_bounce_good_pos = bounce_data[(bounce_data["bounceRate"] > 0.7) & (bounce_data["Position"] <= 15)]
+            for _, row in high_bounce_good_pos.head(2).iterrows():
+                insights.append(f"""### 🚨 High Bounce Rate at Good Position
+**MSID:** `{row.get('msid', 'N/A')}` | **Position:** {row['Position']:.1f} | **Bounce Rate:** {row['bounceRate']:.1%}
+**Title:** {str(row.get('Title', 'Unknown'))[:80]}...
+**Recommendation:** Content may not match search intent. Review content, improve page speed, and enhance readability.""")
+    if not insights:
+        insights.append("No specific engagement-search mismatches detected. Content appears well-balanced.")
+    return insights
+
+def build_engagement_mismatch_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ALL rows that meet mismatch conditions, for CSV download."""
+    if df is None or df.empty: return pd.DataFrame()
+    d = df.copy()
+    for col in ["Clicks","Impressions","CTR","Position","userEngagementDuration","bounceRate","screenPageViews","totalUsers"]:
+        if col in d.columns:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+    # compute expected CTR by avg position if available
+    d["expected_ctr"] = d["Position"].apply(_expected_ctr_for_pos) if "Position" in d.columns else np.nan
+    d["ctr_deficit"] = (d["expected_ctr"] - d["CTR"]) if all(c in d.columns for c in ["expected_ctr","CTR"]) else np.nan
+
+    tags = []
+    for _, row in d.iterrows():
+        tag = None
+        pos = row.get("Position", np.nan)
+        ctr = row.get("CTR", np.nan)
+        impr = row.get("Impressions", 0)
+        br = row.get("bounceRate", np.nan)
+        exp = row.get("expected_ctr", np.nan)
+        # Apply min impressions to cut noise
+        if not pd.isna(impr) and impr < TH["min_impressions"]:
+            tags.append(None); continue
+        # Cases
+        if not pd.isna(pos) and not pd.isna(ctr) and not pd.isna(exp):
+            deficit_pct = (exp - ctr) / exp if exp and exp > 0 else np.nan
+            if pos <= 10 and not pd.isna(deficit_pct) and deficit_pct >= (TH["ctr_deficit_pct"]/100.0):
+                tag = "Low CTR @ Good Position"
+        if tag is None and not pd.isna(pos) and not pd.isna(ctr):
+            if pos > 15 and ctr > 0.05:
+                tag = "Hidden Gem: High CTR @ Poor Position"
+        if tag is None and not pd.isna(br) and not pd.isna(pos):
+            if br > 0.70 and pos <= 15:
+                tag = "High Bounce @ Good Position"
+        tags.append(tag)
+    d["Mismatch_Tag"] = tags
+    d = d[~d["Mismatch_Tag"].isna()].copy()
+
+    # Keep useful columns for export
+    keep_cols = [c for c in [
+        "date","msid","Title","Path","L1_Category","L2_Category","Query",
+        "Position","CTR","expected_ctr","ctr_deficit","Clicks","Impressions",
+        "screenPageViews","totalUsers","userEngagementDuration","bounceRate"
+    ] if c in d.columns]
+    return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"])
+
+def scatter_engagement_vs_search(df):
+    """Cleaner scatter — aggregated & filtered for readability, axis fixes, invert Position if used."""
+    if df is None or df.empty:
+        st.info("No data available for scatter plot"); return
+
+    with st.expander("Scatter Options", expanded=True):
+        aggregate_msids = st.checkbox("Aggregate by article (recommended)", value=True)
+        min_impr = st.slider("Min impressions to include", 0, 5000, TH["min_impressions"], step=50)
+        max_points = st.slider("Max points to plot (after filtering)", 200, 5000, 1500, step=100)
+
+    base = df.copy()
+    if "Impressions" in base.columns:
+        base = base[pd.to_numeric(base["Impressions"], errors="coerce").fillna(0) >= min_impr]
+
+    # pick axes
+    engagement_col = _pick_col(base, ["userEngagementDuration", "totalUsers"])
+    # prefer CTR for x, else Position
+    search_col = "CTR" if "CTR" in base.columns else ("Position" if "Position" in base.columns else None)
+    size_col = _pick_col(base, ["Clicks", "screenPageViews", "Impressions"])
+
+    if not engagement_col or not search_col or not size_col:
+        st.info("Need engagement, search, and a size metric to plot."); return
+
+    if aggregate_msids:
+        agg = {
+            engagement_col: "mean",
+            size_col: "sum"
+        }
+        if search_col == "CTR":
+            agg[search_col] = "mean"
+        elif search_col == "Position":
+            agg[search_col] = "mean"
+        cols = ["msid","Title","L1_Category", engagement_col, search_col, size_col]
+        plot_data = base[cols].dropna().groupby(["msid","Title","L1_Category"], as_index=False).agg(agg)
+    else:
+        plot_data = base[["msid","Title","L1_Category", engagement_col, search_col, size_col]].dropna()
+
+    if len(plot_data) > max_points:
+        plot_data = plot_data.sample(max_points, random_state=CONFIG["performance"]["seed"])
+
+    if plot_data.empty:
+        st.info("No complete data available for scatter plot after cleaning."); return
+
+    if _HAS_PLOTLY:
+        try:
+            title = f"Engagement ({engagement_col}) vs. Search ({search_col})"
+            fig = px.scatter(
+                plot_data,
+                x=search_col, y=engagement_col,
+                size=size_col, color="L1_Category",
+                hover_data=["msid","Title"],
+                title=title,
+                labels={engagement_col: engagement_col.replace("_"," ").title()}
+            )
+            # Invert x-axis if it's Position (lower is better)
+            if search_col == "Position":
+                fig.update_layout(xaxis=dict(autorange="reversed"))
+            # Neater bubbles & layout
+            fig.update_traces(marker=dict(opacity=0.7, line=dict(width=0.5)))
+            fig.update_layout(margin=dict(l=10,r=10,t=60,b=10))
+            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+            export_plot_html(fig, "engagement_vs_search")
+        except Exception as e:
+            st.error(f"Failed to create scatter plot: {e}")
+    else:
+        st.scatter_chart(plot_data, x=search_col, y=engagement_col, size=size_col, color="L1_Category")
+
+def category_treemap(df, value_col, title):
+    if not _HAS_PLOTLY:
+        st.info("Treemap requires Plotly."); return
+    if df is None or df.empty or value_col not in df.columns:
+        st.info(f"No data for treemap (value column: {value_col})."); return
     try:
-        model = ExponentialSmoothing(daily_series, trend="add", seasonal="add", seasonal_periods=7).fit()
-        forecast = model.forecast(periods)
-        # Simple confidence interval
-        std_err = np.std(model.resid) * np.sqrt(np.arange(1, periods + 1))
-        return pd.DataFrame({"date": forecast.index, "forecast": forecast, "low": forecast - 1.96 * std_err, "high": forecast + 1.96 * std_err})
+        agg = df.groupby(["L1_Category","L2_Category"], as_index=False)[value_col].sum()
+        fig = px.treemap(
+            agg, path=["L1_Category","L2_Category"], values=value_col, title=title
+        )
+        fig.update_traces(textinfo="label+value")
+        st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+        export_plot_html(fig, f"treemap_{value_col}")
     except Exception as e:
-        logger.warning(f"Forecasting failed: {e}")
+        st.error(f"Failed to create treemap: {e}")
+
+def category_heatmap(df, value_col, title):
+    if not _HAS_PLOTLY:
+        st.info("Heatmap requires Plotly."); return
+    if df is None or df.empty or value_col not in df.columns:
+        st.info(f"No data for heatmap (value column: {value_col})."); return
+    try:
+        agg_data = df.groupby(["L1_Category", "L2_Category"]).agg(value=(value_col, "sum")).reset_index()
+        if agg_data.empty: st.info("No data after aggregation for heatmap."); return
+        fig = px.density_heatmap(
+            agg_data, x="L1_Category", y="L2_Category", z="value",
+            color_continuous_scale="YlGnBu", title=title, labels={"value": value_col}
+        )
+        st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+        export_plot_html(fig, f"heatmap_{value_col}")
+    except Exception as e:
+        st.error(f"Failed to create heatmap: {e}")
+
+def _series_mode(series: pd.Series):
+    try:
+        m = series.mode()
+        return m.iloc[0] if not m.empty else None
+    except Exception:
         return None
 
+def analyze_category_performance(df):
+    """Expanded with totalUsers, avg session duration, bounceRate, top Query, avg Position."""
+    if df is None or df.empty: return pd.DataFrame()
+    d = df.copy()
+    agg_dict = {
+        "msid": pd.NamedAgg(column="msid", aggfunc="nunique")
+    }
+    rename_map = {"msid": "total_articles"}
+
+    # sums
+    if "Clicks" in d.columns:
+        agg_dict["Clicks"] = pd.NamedAgg(column="Clicks", aggfunc="sum")
+        rename_map["Clicks"] = "total_gsc_clicks"
+    if "screenPageViews" in d.columns:
+        agg_dict["screenPageViews"] = pd.NamedAgg(column="screenPageViews", aggfunc="sum")
+        rename_map["screenPageViews"] = "total_pageviews"
+    if "Impressions" in d.columns:
+        agg_dict["Impressions"] = pd.NamedAgg(column="Impressions", aggfunc="sum")
+        rename_map["Impressions"] = "total_impressions"
+    if "totalUsers" in d.columns:
+        agg_dict["totalUsers"] = pd.NamedAgg(column="totalUsers", aggfunc="sum")
+        rename_map["totalUsers"] = "total_users"
+
+    # means
+    if "userEngagementDuration" in d.columns:
+        agg_dict["userEngagementDuration"] = pd.NamedAgg(column="userEngagementDuration", aggfunc="mean")
+        rename_map["userEngagementDuration"] = "avg_session_duration_s"
+    if "bounceRate" in d.columns:
+        agg_dict["bounceRate"] = pd.NamedAgg(column="bounceRate", aggfunc="mean")
+        rename_map["bounceRate"] = "avg_bounce_rate"
+    if "Position" in d.columns:
+        agg_dict["Position"] = pd.NamedAgg(column="Position", aggfunc="mean")
+        rename_map["Position"] = "avg_position"
+
+    # representative query (mode)
+    if "Query" in d.columns:
+        # compute the most frequent Query per L1,L2
+        rep_query = d.groupby(["L1_Category","L2_Category"])["Query"].agg(_series_mode).reset_index().rename(columns={"Query":"top_query"})
+        grouped = d.groupby(["L1_Category","L2_Category"]).agg(**agg_dict).reset_index().rename(columns=rename_map)
+        grouped = grouped.merge(rep_query, on=["L1_Category","L2_Category"], how="left")
+    else:
+        grouped = d.groupby(["L1_Category","L2_Category"]).agg(**agg_dict).reset_index().rename(columns=rename_map)
+
+    # sort by a sensible metric
+    sort_by = "total_gsc_clicks" if "total_gsc_clicks" in grouped.columns else ("total_pageviews" if "total_pageviews" in grouped.columns else "total_impressions" if "total_impressions" in grouped.columns else "total_articles")
+    return grouped.sort_values(by=sort_by, ascending=False)
+
+def forecast_series(daily_series, periods=14):
+    if daily_series is None or len(daily_series) < 7: return None
+    try:
+        daily_series = daily_series.asfreq("D").fillna(method="ffill").fillna(0)
+        if _HAS_STM and len(daily_series) >= 14:
+            model = ExponentialSmoothing(daily_series, trend="add", seasonal="add", seasonal_periods=7).fit()
+            forecast = model.forecast(periods)
+            std_err = np.std(model.resid) * np.sqrt(np.arange(1, periods + 1))
+            return pd.DataFrame({"date": forecast.index, "forecast": forecast, "low": forecast - 1.96 * std_err, "high": forecast + 1.96 * std_err})
+        last_val = daily_series.rolling(7).mean().iloc[-1]
+        future_dates = pd.date_range(start=daily_series.index.max() + pd.Timedelta(days=1), periods=periods)
+        return pd.DataFrame({"date": future_dates, "forecast": [last_val] * periods, "low": last_val * 0.8, "high": last_val * 1.2})
+    except Exception as e:
+        st.error(f"Forecasting failed: {e}"); return None
+
+def time_series_trends(df, metric_col, title):
+    """Generic line chart (we'll skip calling this for Clicks as requested)."""
+    if df is None or df.empty or "date" not in df.columns or metric_col not in df.columns:
+        st.info(f"Time series analysis requires date and '{metric_col}'."); return
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d = d.dropna(subset=["date", metric_col])
+    daily_data = d.groupby("date")[metric_col].sum()
+    if daily_data.empty: st.info(f"No data for {metric_col} time series."); return
+    if _HAS_PLOTLY:
+        try:
+            fig = px.line(daily_data, title=title, labels={"value": metric_col, "date": "Date"})
+            fig.update_layout(xaxis_rangeslider_visible=True)
+            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+            export_plot_html(fig, f"timeseries_{metric_col}")
+        except Exception as e:
+            st.error(f"Failed to create time series chart: {e}")
+    else:
+        st.line_chart(daily_data)
 # ============================
-# MAIN ANALYSIS UI
+# PART 5/5: Complete Analysis UI & Exports
 # ============================
 st.header("📊 Advanced Analytics & Insights")
 
+# Module: Engagement vs Search Mismatch — cards + full CSV
 st.subheader("Engagement vs. Search Performance Mismatch")
-st.caption("Identify content that over- or under-performs relative to its visibility.")
+st.caption("Identify 'Hidden Gems' (high CTR at poor positions), low CTR at good positions, and high bounce at good positions.")
 
-# NEW: Generate and offer download for the opportunities file
-opportunities_df = identify_opportunities(filtered_df)
-if not opportunities_df.empty:
-    st.success(f"Identified {len(opportunities_df)} articles with clear opportunities.")
-    download_df_button(opportunities_df, "growthoracle_opportunities.csv", "Download Opportunities CSV")
+engagement_cards = engagement_mismatches(filtered_df)
+if isinstance(engagement_cards, list):
+    for card in engagement_cards:
+        st.markdown(card)
+
+# Full mismatch table + CSV export
+mismatch_df = build_engagement_mismatch_table(filtered_df)
+if mismatch_df is not None and not mismatch_df.empty:
+    st.info(f"Found **{len(mismatch_df):,}** mismatch rows.")
+    with st.expander("Preview mismatch rows (first 200)", expanded=False):
+        st.dataframe(mismatch_df.head(200), use_container_width=True, hide_index=True)
+    download_df_button(mismatch_df, f"engagement_search_mismatch_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                       "Download ALL Mismatch Rows (CSV)")
 else:
-    st.info("No specific engagement mismatches found based on current criteria.")
+    st.info("No mismatch rows matched your thresholds and filters.")
 
+# Cleaner Scatter
 st.subheader("Engagement vs. Search Scatter Analysis")
-run_module_safely("Scatter Plot", scatter_engagement_vs_search, filtered_df)
+scatter_engagement_vs_search(filtered_df)
 
 st.divider()
-# ============================
-# PART 5/5: Complete Analysis & Export (MODIFIED)
-# ============================
 
-# MODIFIED: Enhanced category analysis function
-def analyze_category_performance(df):
-    """Analyze category performance with additional metrics."""
-    if df is None or df.empty: return pd.DataFrame()
-
-    agg_dict = {
-        "msid": pd.NamedAgg(column="msid", aggfunc="nunique"),
-        "Clicks": pd.NamedAgg(column="Clicks", aggfunc="sum"),
-        "Impressions": pd.NamedAgg(column="Impressions", aggfunc="sum"),
-    }
-    # Add optional metrics if they exist
-    if "totalUsers" in df.columns: agg_dict["totalUsers"] = pd.NamedAgg(column="totalUsers", aggfunc="sum")
-    if "bounceRate" in df.columns: agg_dict["bounceRate"] = pd.NamedAgg(column="bounceRate", aggfunc="mean")
-    if "Position" in df.columns: agg_dict["Position"] = pd.NamedAgg(column="Position", aggfunc="mean")
-
-    grouped = df.groupby(["L1_Category", "L2_Category"]).agg(**agg_dict).reset_index()
-    rename_map = {
-        "msid": "unique_articles", "Clicks": "total_clicks", "Impressions": "total_impressions",
-        "totalUsers": "total_users", "bounceRate": "avg_bounce_rate", "Position": "avg_position"
-    }
-    grouped = grouped.rename(columns=rename_map)
-    return grouped.sort_values("total_clicks", ascending=False)
-
-# MODIFIED: New, visually improved heatmap
-def category_heatmap(df, value_col, title):
-    """Create a visually improved heatmap with a log scale and text labels."""
-    if df is None or df.empty or value_col not in df.columns:
-        st.info(f"No data for '{value_col}' heatmap."); return
-
-    heatmap_data = df.groupby(['L1_Category', 'L2_Category'])[value_col].sum().reset_index()
-    if heatmap_data.empty: return
-
-    pivot_table = heatmap_data.pivot(index='L2_Category', columns='L1_Category', values=value_col).fillna(0)
-    if pivot_table.empty: return
-
-    # Use a logarithmic scale for color to handle outliers, but display original text
-    log_z = np.log10(pivot_table.where(pivot_table > 0, 1)) # Replace 0 with 1 for log
-
-    fig = go.Figure(data=go.Heatmap(
-        z=log_z, x=pivot_table.columns, y=pivot_table.index,
-        text=pivot_table, texttemplate="%{text:,.0f}", textfont={"size":10},
-        colorscale='Viridis', hoverongaps=False,
-        colorbar_title=f"{value_col} (Log Scale)"
-    ))
-    fig.update_layout(title=title, xaxis_title="L1 Category", yaxis_title="L2 Category", yaxis_autorange='reversed')
-    st.plotly_chart(fig, use_container_width=True)
-
+# Module 5: Category Performance
 st.subheader("Category Performance Analysis")
-st.caption("Analyze the performance of your content categories with enhanced metrics.")
+st.caption("Performance by category with users, session duration, bounce, representative query, and average position.")
 
-category_results = run_module_safely("Category Analysis", analyze_category_performance, filtered_df)
-if category_results is not None and not category_results.empty:
-    st.dataframe(category_results.style.format({
-        'total_clicks': '{:,.0f}', 'total_impressions': '{:,.0f}', 'total_users': '{:,.0f}',
-        'avg_bounce_rate': '{:.2%}', 'avg_position': '{:.1f}'
-    }, na_rep="-"))
-    download_df_button(category_results, "category_performance.csv", "Download Category Analysis")
+category_results = analyze_category_performance(filtered_df)
+if isinstance(category_results, pd.DataFrame) and not category_results.empty:
+    st.dataframe(category_results, use_container_width=True, hide_index=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Category Traffic Distribution")
+        traffic_col = _pick_col(filtered_df, ["Clicks", "screenPageViews", "Impressions"])
+        viz_choice = st.radio("Visualization", ["Treemap (recommended)", "Heatmap"], index=0, horizontal=True)
+        if traffic_col:
+            if viz_choice.startswith("Treemap"):
+                category_treemap(filtered_df, traffic_col, f"Treemap by {traffic_col}")
+            else:
+                category_heatmap(filtered_df, traffic_col, f"Heatmap by {traffic_col}")
+        else:
+            st.info("No traffic metrics (Clicks/Pageviews/Impressions) for visualization.")
+
+    with col2:
+        st.subheader("Top Categories by Performance")
+        perf_col = _pick_col(category_results, ["total_gsc_clicks", "total_pageviews", "total_impressions", "total_users"])
+        if perf_col and _HAS_PLOTLY:
+            top_cats = category_results.nlargest(10, perf_col)
+            fig = px.bar(top_cats, x="L2_Category", y=perf_col, title=f"Top 10 by {perf_col}", color="L1_Category")
+            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+            export_plot_html(fig, f"top_categories_{perf_col}")
+        elif perf_col:
+            st.bar_chart(category_results.nlargest(10, perf_col).set_index("L2_Category")[perf_col])
+        else:
+            st.info("No performance metrics to rank categories.")
 else:
-    st.warning("Could not generate category performance data.")
-
-st.subheader("Category Traffic Distribution")
-traffic_col = _pick_col(filtered_df, ['Clicks', 'totalUsers', 'Impressions'])
-if traffic_col:
-    run_module_safely("Category Heatmap", category_heatmap, filtered_df, traffic_col, f"Category Heatmap by Total {traffic_col}")
+    st.info("Category analysis could not be completed. Check data and mappings.")
 
 st.divider()
+
+# Module 6: Trends & Forecasting
 st.subheader("Trends & Forecasting")
+st.caption("We’ve removed the 'Clicks over time' chart per your request. Choose a different trend metric below. The forecast shows dashed line with a shaded 95% interval.")
 
-# REMOVED: Redundant click chart is gone.
+if "date" in filtered_df.columns and not filtered_df.empty:
+    ts_data = filtered_df.copy()
+    # Prefer non-Clicks metric for the trend line
+    trend_metric_choices = [c for c in ["totalUsers", "screenPageViews", "Impressions"] if c in ts_data.columns]
+    selected_trend_metric = st.selectbox("Trend metric (Clicks excluded)", trend_metric_choices, index=0 if trend_metric_choices else 0)
 
-primary_metric = _pick_col(filtered_df, ["totalUsers", "Clicks", "screenPageViews"])
-if primary_metric:
-    daily_series = filtered_df.groupby(pd.to_datetime(filtered_df['date'].dt.date))[primary_metric].sum()
+    if selected_trend_metric:
+        st.subheader(f"Overall Trend: {selected_trend_metric}")
+        time_series_trends(ts_data, selected_trend_metric, f"{selected_trend_metric} Over Time")
 
-    if len(daily_series) >= 14:
-        st.subheader(f"14-Day Forecast for {primary_metric.replace('_', ' ').title()}")
-        forecast_data = forecast_series(daily_series)
-        if forecast_data is not None and _HAS_PLOTLY:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=daily_series.index, y=daily_series.values, name="Historical Data", line=dict(color="blue")))
-            fig.add_trace(go.Scatter(x=forecast_data["date"], y=forecast_data["forecast"], name="Forecast", line=dict(color="red", dash="dash")))
-            fig.add_trace(go.Scatter(x=pd.concat([forecast_data["date"], forecast_data["date"][::-1]]), y=pd.concat([forecast_data["high"], forecast_data["low"][::-1]]), fill="toself", fillcolor="rgba(255,0,0,0.2)", line=dict(color="rgba(255,255,255,0)"), name="Confidence Interval"))
+    # Forecast: use a sensible primary metric (prefer users/pageviews; fallback to impressions; only if available)
+    primary_metric = _pick_col(ts_data, ["totalUsers", "screenPageViews", "Impressions"])
+    if primary_metric:
+        daily_series = ts_data.groupby(pd.to_datetime(ts_data['date']))[primary_metric].sum()
+        if len(daily_series) >= 7:
+            st.subheader(f"14-Day Forecast for {primary_metric}")
+            forecast_data = forecast_series(daily_series, periods=14)
+            if forecast_data is not None and _HAS_PLOTLY:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=daily_series.index, y=daily_series.values, name="Historical"))
+                fig.add_trace(go.Scatter(x=forecast_data["date"], y=forecast_data["forecast"], name="Forecast", line=dict(dash="dash")))
+                fig.add_trace(go.Scatter(x=forecast_data["date"], y=forecast_data["high"], fill=None, mode='lines', line_color='rgba(200,0,0,0.25)', name="Upper 95%"))
+                fig.add_trace(go.Scatter(x=forecast_data["date"], y=forecast_data["low"], fill='tonexty', mode='lines', line_color='rgba(200,0,0,0.25)', name="Lower 95%"))
+                fig.update_layout(margin=dict(l=10,r=10,t=40,b=10), legend=dict(orientation="h"))
+                st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+                # concise explanation
+                st.caption("Dashed line = forecast, shaded band = 95% interval. Based on 7-day seasonal smoothing when available.")
+                # metrics
+                total_fc = float(forecast_data["forecast"].sum())
+                total_lo = float(forecast_data["low"].sum())
+                total_hi = float(forecast_data["high"].sum())
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Projected next 14-day total", f"{total_fc:,.0f}")
+                m2.metric("Low (95%)", f"{total_lo:,.0f}")
+                m3.metric("High (95%)", f"{total_hi:,.0f}")
 
-            fig.update_layout(
-                title=f"14-Day Forecast for {primary_metric}", hovermode="x unified",
-                annotations=[dict(xref='paper', yref='paper', x=0.5, y=-0.25, showarrow=False, text="The shaded area represents the 95% confidence interval where actual results are expected to fall.")]
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption("This forecast uses a Holt-Winters model to project future performance based on past trends and seasonality in your data.")
+                # CSV export
+                fc_df = forecast_data.copy()
+                fc_df["date"] = fc_df["date"].dt.strftime("%Y-%m-%d")
+                download_df_button(fc_df, f"forecast_{primary_metric}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                                   f"Download {primary_metric} Forecast (CSV)")
     else:
-        st.info(f"Insufficient data (need at least 14 days) to generate a reliable forecast for {primary_metric}.")
+        st.info("No suitable metrics (Users/Pageviews/Impressions) found for forecasting.")
 else:
-    st.info("No primary metric (totalUsers, Clicks) found for forecasting.")
+    st.info("Date column required for trend analysis and forecasting.")
+
+# ============================
+# EXPORT & SUMMARY
+# ============================
+st.divider()
+st.subheader("📤 Export & Summary")
+
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    download_df_button(filtered_df, f"growthoracle_analysis_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download Analysis Data")
+with col2:
+    if isinstance(category_results, pd.DataFrame) and not category_results.empty:
+        download_df_button(category_results, f"category_performance_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download Category Analysis")
+with col3:
+    if mismatch_df is not None and not mismatch_df.empty:
+        download_df_button(mismatch_df, f"engagement_search_mismatch_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", "Download Mismatch Rows (CSV)")
+with col4:
+    if "Clicks" in filtered_df.columns:
+        total_clicks = pd.to_numeric(filtered_df["Clicks"], errors="coerce").fillna(0).sum()
+        st.metric("Total GSC Clicks (analyzed)", f"{int(total_clicks):,}")
 
 st.divider()
-st.subheader("📤 Export Full Dataset")
-download_df_button(master_df, "growthoracle_full_dataset.csv", "Download Full Processed Data")
+st.subheader("🎯 Key Recommendations")
+if isinstance(engagement_cards, list) and len(engagement_cards) > 1:
+    st.success("**Priority Actions Based on Your Data:**")
+    for card in engagement_cards[:3]:
+        st.markdown(f"- {card.split('**Recommendation:**')[-1].strip()}")
+else:
+    st.info("Process your data to generate personalized recommendations.")
+
+# Footer
+st.markdown("---")
+st.caption("GrowthOracle AI v2.0 | End of Report")
