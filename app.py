@@ -1144,11 +1144,12 @@ def category_heatmap(df, value_col, title):
 
 # --- Module 5: Category Performance (FIXED)
 def analyze_category_performance(df):
-    """Analyze performance by content categories"""
+    """Analyze performance by content categories - FIXED VERSION"""
     d = df.copy()
     if d.empty: 
         return pd.DataFrame()
 
+    # Ensure categories exist
     if "L1_Category" not in d.columns: 
         d["L1_Category"] = "Uncategorized"
     if "L2_Category" not in d.columns: 
@@ -1156,6 +1157,7 @@ def analyze_category_performance(df):
     if "msid" not in d.columns: 
         d["msid"] = range(len(d))
 
+    # Find available columns
     engagement_col = next((c for c in ["userEngagementDuration","engagement_duration"] if c in d.columns), None)
     pageviews_col  = next((c for c in ["screenPageViews","pageviews"] if c in d.columns), None)
     users_col      = next((c for c in ["totalUsers","users"] if c in d.columns), None)
@@ -1164,56 +1166,80 @@ def analyze_category_performance(df):
     if not any([engagement_col, pageviews_col, users_col, clicks_col]):
         return pd.DataFrame()
 
+    # Coerce to numeric and fill NaN with 0
     for c in [engagement_col, pageviews_col, users_col, clicks_col]:
         if c and c in d.columns: 
-            d[c] = pd.to_numeric(d[c], errors="coerce")
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0)
 
+    # Determine traffic column
     traffic_col = pageviews_col or users_col
 
-    agg = {"msid":"nunique"}
-    if traffic_col and traffic_col in d.columns:   
-        agg[traffic_col] = "sum"
+    # Build aggregation dict
+    agg_dict = {"msid": "nunique"}
+    
+    if traffic_col and traffic_col in d.columns:
+        agg_dict["total_traffic"] = (traffic_col, "sum")
+    
     if engagement_col and engagement_col in d.columns:
-        agg[engagement_col] = "mean"
-    if clicks_col and clicks_col in d.columns:    
-        agg[clicks_col] = "sum"
+        agg_dict["avg_engagement_duration"] = (engagement_col, "mean")
+    
+    if clicks_col and clicks_col in d.columns:
+        agg_dict["total_gsc_clicks"] = (clicks_col, "sum")
 
-    grouped = (d.groupby(["L1_Category","L2_Category"])
-                 .agg(agg)
-                 .rename(columns={
-                     "msid":"total_articles",
-                     traffic_col:"total_traffic" if traffic_col else None,
-                     engagement_col:"avg_engagement_duration" if engagement_col else None,
-                     clicks_col:"total_gsc_clicks" if clicks_col else None
-                 })
-                 .reset_index())
+    # Group by categories
+    grouped = (d.groupby(["L1_Category", "L2_Category"], dropna=False)
+                .agg(**agg_dict)
+                .reset_index())
+    
+    # Rename msid column
+    grouped.rename(columns={"msid": "total_articles"}, inplace=True)
 
-    site_avg_traffic = grouped["total_traffic"].mean() if "total_traffic" in grouped.columns else 0.0
-    site_avg_eng     = grouped["avg_engagement_duration"].mean() if "avg_engagement_duration" in grouped.columns else 0.0
-
-    grouped["traffic_index"]    = (grouped.get("total_traffic", 0) / site_avg_traffic).fillna(0) if site_avg_traffic > 0 else 0
-    grouped["engagement_index"] = (grouped.get("avg_engagement_duration", 0) / site_avg_eng).fillna(0) if site_avg_eng > 0 else 0
-
-    def quadrant(row):
-        ht = row.get("traffic_index",0) >= 1.0
-        he = row.get("engagement_index",0) >= 1.0
-        if ht and he: return "Stars"
-        if (not ht) and he: return "Hidden Gems"
-        if ht and (not he): return "Workhorses"
-        return "Underperformers"
-
-    if "traffic_index" in grouped.columns and "engagement_index" in grouped.columns:
-        grouped["quadrant"] = grouped.apply(quadrant, axis=1)
+    # Calculate site-wide averages (exclude zeros for meaningful averages)
+    if "total_traffic" in grouped.columns:
+        site_avg_traffic = grouped[grouped["total_traffic"] > 0]["total_traffic"].mean()
+        site_avg_traffic = site_avg_traffic if pd.notna(site_avg_traffic) and site_avg_traffic > 0 else 1.0
+        grouped["traffic_index"] = (grouped["total_traffic"] / site_avg_traffic).round(2)
     else:
-        grouped["quadrant"] = "N/A"
+        grouped["traffic_index"] = 0.0
+    
+    if "avg_engagement_duration" in grouped.columns:
+        site_avg_eng = grouped[grouped["avg_engagement_duration"] > 0]["avg_engagement_duration"].mean()
+        site_avg_eng = site_avg_eng if pd.notna(site_avg_eng) and site_avg_eng > 0 else 1.0
+        grouped["engagement_index"] = (grouped["avg_engagement_duration"] / site_avg_eng).round(2)
+    else:
+        grouped["engagement_index"] = 0.0
+
+    # Assign quadrants
+    def quadrant(row):
+        ht = row.get("traffic_index", 0) >= 1.0
+        he = row.get("engagement_index", 0) >= 1.0
+        if ht and he: return "⭐ Stars"
+        if (not ht) and he: return "💎 Hidden Gems"
+        if ht and (not he): return "🏋️ Workhorses"
+        return "📉 Underperformers"
+
+    grouped["quadrant"] = grouped.apply(quadrant, axis=1)
+    
+    # Sort by traffic
+    if "total_traffic" in grouped.columns:
+        grouped = grouped.sort_values("total_traffic", ascending=False)
     
     return grouped
-
 # --- Module 6: Trends & Forecasts (FIXED)
 def forecast_series(daily_series, periods=14):
-    """Generate forecast for time series with fallback"""
-    # FIXED: Use ffill instead of deprecated fillna(method='ffill')
-    daily_series = daily_series.asfreq("D").ffill()
+    """Generate forecast - FIXED to handle edge cases"""
+    if daily_series.empty or daily_series.sum() == 0:
+        # Return empty forecast if no data
+        idx = pd.date_range(pd.Timestamp.now(), periods=periods, freq="D")
+        return pd.DataFrame({
+            "date": idx, 
+            "forecast": [0]*periods, 
+            "low": [0]*periods, 
+            "high": [0]*periods
+        })
+    
+    # Fill forward to handle missing dates
+    daily_series = daily_series.asfreq("D").ffill().fillna(0)
     
     if _HAS_STM and len(daily_series) >= 14:
         try:
@@ -1225,29 +1251,32 @@ def forecast_series(daily_series, periods=14):
             )
             fit = model.fit(optimized=True)
             fc = fit.forecast(periods)
-            resid = daily_series - fit.fittedvalues.reindex(daily_series.index, fill_value=np.nan)
-            s = float(resid.std())
+            resid = daily_series - fit.fittedvalues.reindex(daily_series.index, fill_value=0)
+            s = float(resid.std()) if resid.std() > 0 else 1.0
             lower = fc - 1.96*s
             upper = fc + 1.96*s
             return pd.DataFrame({
                 "date": fc.index, 
                 "forecast": fc.values, 
-                "low": lower.values, 
+                "low": lower.values.clip(min=0), 
                 "high": upper.values
             })
         except Exception as e:
             logger.warning(f"Forecasting failed, using fallback: {e}")
     
-    # Fallback: last 7-day average flat forecast
+    # Fallback: last 7-day average
     roll = daily_series.rolling(7, min_periods=1).mean()
-    last = float(roll.iloc[-1]) if not roll.empty else 0.0
+    last = float(roll.iloc[-1]) if len(roll) > 0 and pd.notna(roll.iloc[-1]) else float(daily_series.mean())
+    last = last if last > 0 else 0.0
+    
     idx = pd.date_range(daily_series.index.max() + pd.Timedelta(days=1), periods=periods, freq="D")
     fc = pd.Series([last]*periods, index=idx)
+    
     return pd.DataFrame({
         "date": fc.index, 
         "forecast": fc.values, 
-        "low": fc.values*0.9, 
-        "high": fc.values*1.1
+        "low": (fc.values * 0.9).clip(min=0), 
+        "high": fc.values * 1.1
     })
 
 def time_series_trends(df, metric_col, title):
@@ -1308,67 +1337,116 @@ st.divider()
 # ---------- UI: Module 6 ----------
 st.subheader("Module 6: Trends & Forecasts")
 
-if "date" in filtered_df.columns:
-    tdf = filtered_df.copy()
-    tdf["date"] = pd.to_datetime(tdf["date"], errors="coerce")
-    tdf = tdf.dropna(subset=["date"])
-    
-    perf_col = "totalUsers" if "totalUsers" in tdf.columns else (
-        "screenPageViews" if "screenPageViews" in tdf.columns else (
-            "Clicks" if "Clicks" in tdf.columns else None
-        )
-    )
-    
-    if perf_col:
-        daily = tdf.groupby("date")[perf_col].sum().asfreq("D").fillna(0)
-        fc = forecast_series(daily, periods=14)
+if "date" not in filtered_df.columns:
+    st.info("No date column available for forecasting.")
+    st.stop()
 
-        if go is not None and px is not None:
-            base = daily.reset_index().rename(columns={perf_col:"value"})
-            base.columns = ["date", "value"]
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=base["date"], 
-                y=base["value"], 
-                name="History", 
-                mode="lines"
-            ))
-            fig.add_trace(go.Scatter(
-                x=fc["date"], 
-                y=fc["forecast"], 
-                name="Forecast", 
-                mode="lines"
-            ))
-            
-            # Confidence interval
-            fig.add_trace(go.Scatter(
-                x=pd.concat([fc["date"], fc["date"][::-1]]),
-                y=pd.concat([fc["high"], fc["low"][::-1]]),
-                fill="toself", 
-                fillcolor="rgba(0,0,0,0.1)", 
-                line=dict(width=0), 
-                name="Confidence"
-            ))
-            
-            fig.update_layout(title=f"Overall {perf_col} Forecast (next 14 days)")
-            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-            export_plot_html(fig, "forecast_overall")
-        else:
-            st.line_chart(daily, height=240)
+tdf = filtered_df.copy()
+tdf["date"] = pd.to_datetime(tdf["date"], errors="coerce")
+tdf = tdf.dropna(subset=["date"])
 
-        # Simple time series for another key metric if available
-        key_metric = "Impressions" if "Impressions" in tdf.columns else (
-            "CTR" if "CTR" in tdf.columns else (
-                "Position" if "Position" in tdf.columns else None
-            )
-        )
-        if key_metric:
-            time_series_trends(tdf, key_metric, f"{key_metric} Over Time")
-    else:
-        st.info("Need Users/Pageviews/Clicks for forecasting.")
+if tdf.empty:
+    st.info("No valid dates found in filtered data.")
 else:
-    st.info("No date column for forecasting.")
+    # Determine performance column
+    perf_col = None
+    for candidate in ["totalUsers", "screenPageViews", "Clicks", "Impressions"]:
+        if candidate in tdf.columns:
+            perf_col = candidate
+            break
+    
+    if not perf_col:
+        st.info("No suitable metric column found for forecasting (need Users, Pageviews, Clicks, or Impressions).")
+    else:
+        # Aggregate daily
+        tdf[perf_col] = pd.to_numeric(tdf[perf_col], errors="coerce").fillna(0)
+        daily = tdf.groupby("date")[perf_col].sum()
+        
+        # Check if we have actual data
+        if daily.sum() == 0 or len(daily) == 0:
+            st.warning(f"No non-zero values found for {perf_col} in the selected date range.")
+        else:
+            # Set proper index and fill gaps
+            daily = daily.asfreq("D").fillna(0)
+            
+            st.write(f"**Metric being forecast:** {perf_col}")
+            st.write(f"**Historical data points:** {len(daily)} days")
+            st.write(f"**Total {perf_col}:** {daily.sum():,.0f}")
+            
+            # Generate forecast
+            fc = forecast_series(daily, periods=14)
+
+            if go is not None:
+                base = daily.reset_index()
+                base.columns = ["date", "value"]
+                
+                fig = go.Figure()
+                
+                # Historical data
+                fig.add_trace(go.Scatter(
+                    x=base["date"], 
+                    y=base["value"], 
+                    name="Historical", 
+                    mode="lines",
+                    line=dict(color="blue", width=2)
+                ))
+                
+                # Forecast
+                fig.add_trace(go.Scatter(
+                    x=fc["date"], 
+                    y=fc["forecast"], 
+                    name="Forecast", 
+                    mode="lines",
+                    line=dict(color="orange", width=2, dash="dash")
+                ))
+                
+                # Confidence interval
+                fig.add_trace(go.Scatter(
+                    x=pd.concat([fc["date"], fc["date"][::-1]]),
+                    y=pd.concat([fc["high"], fc["low"][::-1]]),
+                    fill="toself", 
+                    fillcolor="rgba(255,165,0,0.2)", 
+                    line=dict(width=0), 
+                    name="95% Confidence Interval",
+                    showlegend=True
+                ))
+                
+                fig.update_layout(
+                    title=f"{perf_col} Forecast (Next 14 Days)",
+                    xaxis_title="Date",
+                    yaxis_title=perf_col,
+                    hovermode="x unified"
+                )
+                
+                st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+                export_plot_html(fig, "forecast_overall")
+                
+                # Show forecast table
+                with st.expander("📊 View Forecast Data"):
+                    forecast_display = fc.copy()
+                    forecast_display["date"] = forecast_display["date"].dt.date
+                    forecast_display["forecast"] = forecast_display["forecast"].round(0).astype(int)
+                    forecast_display["low"] = forecast_display["low"].round(0).astype(int)
+                    forecast_display["high"] = forecast_display["high"].round(0).astype(int)
+                    st.dataframe(forecast_display, use_container_width=True, hide_index=True)
+            else:
+                # Fallback: simple line chart
+                st.line_chart(daily, height=300)
+                st.caption("Install plotly for interactive forecasts: pip install plotly")
+
+            # Additional time series for other metrics
+            st.markdown("---")
+            st.markdown("### Additional Metrics Over Time")
+            
+            other_metrics = []
+            for candidate in ["Impressions", "CTR", "Position", "screenPageViews"]:
+                if candidate in tdf.columns and candidate != perf_col:
+                    other_metrics.append(candidate)
+            
+            if other_metrics:
+                selected_metric = st.selectbox("Select metric to visualize:", other_metrics)
+                if selected_metric:
+                    time_series_trends(tdf, selected_metric, f"{selected_metric} Over Time")
 
 st.divider()
 
@@ -1415,3 +1493,4 @@ st.success("✅ Analysis complete! Review insights above and download exports as
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI — Next Gen | Built with Streamlit | Data Quality-First Analytics")
+
