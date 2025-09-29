@@ -808,14 +808,14 @@ else:
 
 # --- Data Preview + Full CSV download ---
 st.subheader("Data Preview (First 10 rows)")
-col_prev, col_btn = st.columns([0.66, 0.34])
+col_prev, col_btn = st.columns([0.80, 0.20])
 
 with col_btn:
     # Button to download the ENTIRE merged dataset
     download_df_button(
         master_df,
         f"master_merged_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-        "Download FULL merged dataset (CSV)"
+        "Download Full Merged dataset (CSV)"
     )
 
 # (Optional) make the first-10 preview friendlier by showing 0 instead of None for key metrics
@@ -1520,6 +1520,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
