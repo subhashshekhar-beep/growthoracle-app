@@ -1074,3 +1074,4 @@ if "date" in filtered_df.columns:
 else:
     st.info("No date column for forecasting.")
 st.divider()
+
