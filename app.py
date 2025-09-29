@@ -688,44 +688,430 @@ else:
 
 # Simplified processing function for demonstration
 @st.cache_data(show_spinner=False)
-def process_data_simple(prod_df, ga4_df, gsc_df, prod_map, ga4_map, gsc_map):
-    """Simplified processing for demonstration"""
+# ============================
+# PART 3/5: Onboarding Steps, Mapping UI, Validation UI, Robust Processing
+# ============================
+
+# [Keep all the previous functions and code until the processing section...]
+
+# Replace the simple processing function with this COMPLETE version:
+
+def standardize_dates_early(prod_df, ga4_df, gsc_df, mappings, vc: ValidationCollector):
+    """Standardize date formats early in processing pipeline"""
+    
+    def _ensure_utc(ts: pd.Timestamp) -> pd.Timestamp:
+        if pd.isna(ts):
+            return ts
+        try:
+            return ts.tz_convert("UTC")
+        except Exception:
+            try:
+                return ts.tz_localize("UTC")
+            except Exception:
+                return ts
+
+    def normalize_date_only(df, col_name, out_name):
+        if df is not None and col_name in df.columns:
+            dt = safe_dt_parse(df[col_name], col_name, vc)
+            df[out_name] = dt.dt.date
+            if dt.notna().any():
+                maxd, mind = dt.max(), dt.min()
+                maxd_utc, mind_utc = _ensure_utc(maxd), _ensure_utc(mind)
+                now_utc = pd.Timestamp.now(tz="UTC")
+                if (pd.notna(maxd_utc)) and (maxd_utc > now_utc + pd.Timedelta(days=1)):
+                    vc.add("Warning", "FUTURE_DATE", f"{out_name} has future dates", sample=str(maxd_utc))
+                if (pd.notna(mind_utc)) and (mind_utc < pd.Timestamp(2020, 1, 1, tz="UTC")):
+                    vc.add("Info", "OLD_DATE", f"{out_name} includes <2020 dates", earliest=str(mind_utc))
+
+    # Process production data
+    p = prod_df.copy() if prod_df is not None else None
+    if p is not None and mappings["prod"].get("publish") and mappings["prod"]["publish"] in p.columns:
+        p["Publish Time"] = safe_dt_parse(p[mappings["prod"]["publish"]], "Publish Time", vc)
+    elif p is not None:
+        for cand in detect_date_cols(p):
+            if "publish" in cand.lower():
+                p["Publish Time"] = safe_dt_parse(p[cand], cand, vc)
+                vc.add("Info", "DATE_DETECT", "Detected publish column in Production", column=cand)
+                break
+
+    # Process GA4 data
+    g4 = ga4_df.copy() if ga4_df is not None else None
+    if g4 is not None:
+        g4_date_col = mappings["ga4"].get("date") or "date"
+        if g4_date_col in g4.columns:
+            normalize_date_only(g4, g4_date_col, "date")
+
+    # Process GSC data
+    gs = gsc_df.copy() if gsc_df is not None else None
+    if gs is not None:
+        gs_date_col = mappings["gsc"].get("date") or "Date"
+        if gs_date_col in gs.columns:
+            normalize_date_only(gs, gs_date_col, "date")
+
+    return p, g4, gs
+
+@st.cache_data(show_spinner=False, max_entries=3)
+def process_uploaded_files_complete(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map,
+                                   vc_serialized: Optional[str] = None,
+                                   merge_strategy: Optional[Dict[str, str]] = None):
+    """COMPLETE processing pipeline that processes ALL data"""
     vc = ValidationCollector()
     
+    # Load previous validation messages
+    if vc_serialized:
+        try:
+            messages = json.loads(vc_serialized)
+            for item in messages:
+                ctx = item.get("context", {})
+                if isinstance(ctx, str):
+                    try:
+                        ctx = json.loads(ctx)
+                    except:
+                        ctx = {}
+                vc.add(item["category"], item["code"], item["message"], **ctx)
+        except Exception as e:
+            vc.add("Warning", "VC_LOAD_FAIL", f"Failed to load previous validation: {e}")
+    
+    ms = merge_strategy or MERGE_STRATEGY
+
+    # Create safe copies
+    prod_df = prod_df_raw.copy() if prod_df_raw is not None else None
+    ga4_df = ga4_df_raw.copy() if ga4_df_raw is not None else None
+    gsc_df = gsc_df_raw.copy() if gsc_df_raw is not None else None
+
+    # Validate and rename Production columns
+    if prod_df is None or prod_map.get("msid") not in prod_df.columns:
+        vc.add("Critical", "MISSING_KEY", "Production missing MSID column", want=prod_map.get("msid"))
+        return None, vc
+        
     try:
-        # Basic merge logic (simplified)
-        prod_clean = prod_df[[prod_map["msid"]]].copy()
-        prod_clean["msid"] = pd.to_numeric(prod_clean[prod_map["msid"]], errors="coerce")
-        prod_clean = prod_clean.dropna()
-        
-        # Create a simple merged dataset
-        merged_df = pd.DataFrame({
-            "msid": prod_clean["msid"].head(100),  # Limit for demo
-            "sample_data": ["demo"] * min(100, len(prod_clean))
-        })
-        
-        vc.add("Info", "DEMO_MODE", "Using simplified processing for demonstration")
-        return merged_df, vc
-        
+        prod_df.rename(columns={prod_map["msid"]: "msid"}, inplace=True)
+        if prod_map.get("title") in prod_df.columns:
+            prod_df.rename(columns={prod_map["title"]: "Title"}, inplace=True)
+        if prod_map.get("path") in prod_df.columns:
+            prod_df.rename(columns={prod_map["path"]: "Path"}, inplace=True)
+        if prod_map.get("publish") in prod_df.columns:
+            prod_df.rename(columns={prod_map["publish"]: "Publish Time"}, inplace=True)
     except Exception as e:
-        vc.add("Critical", "PROCESS_FAIL", f"Processing failed: {e}")
+        vc.add("Critical", "PROD_RENAME_FAIL", f"Failed to rename production columns: {e}")
         return None, vc
 
-# Process data
-with st.spinner("Processing data..."):
-    master_df, vc_after = process_data_simple(prod_df_raw, ga4_df_raw, gsc_df_raw, prod_map, ga4_map, gsc_map)
+    # Validate and rename GA4 columns
+    if ga4_df is None or ga4_map.get("msid") not in ga4_df.columns:
+        vc.add("Critical", "MISSING_KEY", "GA4 missing MSID column", want=ga4_map.get("msid"))
+        return None, vc
+        
+    try:
+        ga4_df.rename(columns={ga4_map["msid"]: "msid"}, inplace=True)
+        if ga4_map.get("date") in ga4_df.columns:
+            ga4_df.rename(columns={ga4_map["date"]: "date"}, inplace=True)
+        if ga4_map.get("pageviews") in ga4_df.columns:
+            ga4_df.rename(columns={ga4_map["pageviews"]: "screenPageViews"}, inplace=True)
+        if ga4_map.get("users") in ga4_df.columns:
+            ga4_df.rename(columns={ga4_map["users"]: "totalUsers"}, inplace=True)
+        if ga4_map.get("engagement") in ga4_df.columns:
+            ga4_df.rename(columns={ga4_map["engagement"]: "userEngagementDuration"}, inplace=True)
+        if ga4_map.get("bounce") in ga4_df.columns:
+            ga4_df.rename(columns={ga4_map["bounce"]: "bounceRate"}, inplace=True)
+    except Exception as e:
+        vc.add("Critical", "GA4_RENAME_FAIL", f"Failed to rename GA4 columns: {e}")
+        return None, vc
 
-if master_df is None:
+    # Validate and rename GSC columns
+    if gsc_df is None:
+        vc.add("Critical", "MISSING_DATA", "GSC data is missing")
+        return None, vc
+        
+    try:
+        gsc_ren = {
+            gsc_map["date"]: "date", 
+            gsc_map["page"]: "page_url", 
+            gsc_map["query"]: "Query",
+            gsc_map["impr"]: "Impressions", 
+            gsc_map.get("ctr", "CTR"): "CTR", 
+            gsc_map["pos"]: "Position"
+        }
+        
+        for k in list(gsc_ren.keys()):
+            if k not in gsc_df.columns:
+                vc.add("Critical", "MISSING_COL", f"GSC missing required column '{k}'")
+                return None, vc
+                
+        gsc_df.rename(columns=gsc_ren, inplace=True)
+    except Exception as e:
+        vc.add("Critical", "GSC_RENAME_FAIL", f"Failed to rename GSC columns: {e}")
+        return None, vc
+
+    # Early date standardization
+    try:
+        prod_df, ga4_df, gsc_df = standardize_dates_early(
+            prod_df, ga4_df, gsc_df,
+            {"prod": prod_map, "ga4": ga4_map, "gsc": gsc_map}, 
+            vc
+        )
+    except Exception as e:
+        vc.add("Warning", "DATE_STD_FAIL", f"Date standardization had issues: {e}")
+
+    # Convert MSIDs to numeric
+    try:
+        for df, col in [(prod_df, "msid"), (ga4_df, "msid")]:
+            if df is not None:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+                bad = df[col].isna().sum()
+                if bad > 0:
+                    vc.add("Warning", "MSID_BAD", "Non-numeric MSIDs dropped", rows=int(bad))
+                df.dropna(subset=[col], inplace=True)
+                if len(df) > 0:
+                    df[col] = df[col].astype("int64")
+    except Exception as e:
+        vc.add("Warning", "MSID_CONV_FAIL", f"MSID conversion failed: {e}")
+
+    # Extract MSID from GSC URLs
+    try:
+        if gsc_df is not None and "msid" not in gsc_df.columns:
+            def _extract_msid_from_url(url):
+                if pd.isna(url):
+                    return None
+                try:
+                    m = re.search(r"/(\d+)\.cms", str(url))
+                    return int(m.group(1)) if m else None
+                except:
+                    return None
+                    
+            gsc_df["msid"] = gsc_df["page_url"].apply(_extract_msid_from_url)
+            missing = gsc_df["msid"].isna().sum()
+            if missing > 0:
+                vc.add("Warning", "MSID_FROM_URL", "Some GSC rows lacked MSID in URL", unresolved=int(missing))
+            gsc_df.dropna(subset=["msid"], inplace=True)
+            if len(gsc_df) > 0:
+                gsc_df["msid"] = gsc_df["msid"].astype("int64")
+    except Exception as e:
+        vc.add("Warning", "MSID_EXTRACT_FAIL", f"MSID extraction failed: {e}")
+
+    # Numeric coercions for GSC
+    try:
+        if gsc_df is not None:
+            if "Impressions" in gsc_df.columns:
+                gsc_df["Impressions"] = coerce_numeric(gsc_df["Impressions"], "GSC.Impressions", vc, clamp=(0, float("inf")))
+            
+            if "CTR" in gsc_df.columns:
+                if gsc_df["CTR"].dtype == object:
+                    tmp = gsc_df["CTR"].astype(str).str.replace("%", "", regex=False)
+                    ctr_val = pd.to_numeric(tmp, errors="coerce")
+                    if (ctr_val > 1.0).any():
+                        ctr_val = ctr_val / 100.0
+                        vc.add("Info", "CTR_SCALE", "CTR parsed as percentage (÷100)")
+                    gsc_df["CTR"] = ctr_val
+                else:
+                    gsc_df["CTR"] = pd.to_numeric(gsc_df["CTR"], errors="coerce")
+                
+                out_of_bounds = ((gsc_df["CTR"] < 0) | (gsc_df["CTR"] > 1)).sum()
+                if out_of_bounds > 0:
+                    vc.add("Warning", "CTR_CLAMP", "CTR values clamped to [0,1]", rows=int(out_of_bounds))
+                    gsc_df["CTR"] = gsc_df["CTR"].clip(0, 1)
+            
+            if "Position" in gsc_df.columns:
+                gsc_df["Position"] = coerce_numeric(gsc_df["Position"], "GSC.Position", vc, clamp=(1, 100))
+    except Exception as e:
+        vc.add("Warning", "GSC_NUMERIC_FAIL", f"GSC numeric conversion failed: {e}")
+
+    # Parse categories from Path
+    try:
+        if prod_df is not None and "Path" in prod_df.columns:
+            def parse_path(path_str):
+                if not isinstance(path_str, str):
+                    return ("Uncategorized", "Uncategorized")
+                s = path_str.strip().strip("/")
+                if not s:
+                    return ("Uncategorized", "Uncategorized")
+                parts = [p for p in s.split("/") if p and p.strip()]
+                if len(parts) == 0:
+                    return ("Uncategorized", "Uncategorized")
+                elif len(parts) == 1:
+                    return (parts[0], "General")
+                else:
+                    return (parts[0], parts[1])
+                    
+            cat_tuples = prod_df["Path"].apply(parse_path)
+            prod_df[["L1_Category", "L2_Category"]] = pd.DataFrame(cat_tuples.tolist(), index=prod_df.index)
+        else:
+            if prod_df is not None:
+                prod_df["L1_Category"] = "Uncategorized"
+                prod_df["L2_Category"] = "Uncategorized"
+    except Exception as e:
+        vc.add("Warning", "CATEGORY_PARSE_FAIL", f"Category parsing failed: {e}")
+        if prod_df is not None:
+            prod_df["L1_Category"] = "Uncategorized"
+            prod_df["L2_Category"] = "Uncategorized"
+
+    # Merge GSC with Production
+    before_counts = {
+        "prod": len(prod_df) if prod_df is not None else 0,
+        "ga4": len(ga4_df) if ga4_df is not None else 0, 
+        "gsc": len(gsc_df) if gsc_df is not None else 0
+    }
+    
+    try:
+        if gsc_df is not None and prod_df is not None:
+            # Get all available columns from production
+            prod_cols = ["msid"]
+            for col in ["Title", "Path", "Publish Time", "L1_Category", "L2_Category"]:
+                if col in prod_df.columns:
+                    prod_cols.append(col)
+            
+            merged_1 = pd.merge(
+                gsc_df,
+                prod_df[prod_cols].drop_duplicates(subset=["msid"]),
+                on="msid", 
+                how=ms.get("gsc_x_prod", "left")
+            )
+            vc.checkpoint("merge_gsc_prod", before=before_counts, after_m1=len(merged_1))
+        else:
+            vc.add("Critical", "MERGE_FAIL", "Cannot merge - missing GSC or Production data")
+            return None, vc
+    except Exception as e:
+        vc.add("Critical", "MERGE_GSC_PROD_FAIL", f"GSC-Production merge failed: {e}")
+        return None, vc
+
+    # Prepare GA4 daily aggregates
+    try:
+        if ga4_df is not None and "date" in ga4_df.columns:
+            # Get numeric columns for aggregation
+            numeric_cols = []
+            for col in ["screenPageViews", "totalUsers", "userEngagementDuration", "bounceRate"]:
+                if col in ga4_df.columns:
+                    numeric_cols.append(col)
+            
+            if numeric_cols:
+                ga4_daily = ga4_df.groupby(["msid", "date"], as_index=False)[numeric_cols].sum(min_count=1)
+            else:
+                ga4_daily = ga4_df.copy()
+        else:
+            ga4_daily = ga4_df.copy() if ga4_df is not None else pd.DataFrame()
+            if "date" not in ga4_daily.columns:
+                ga4_daily["date"] = pd.NaT
+            vc.add("Info", "GA4_NO_DATE", "GA4 had no date; set NaT")
+    except Exception as e:
+        vc.add("Warning", "GA4_AGG_FAIL", f"GA4 aggregation failed: {e}")
+        ga4_daily = pd.DataFrame()
+
+    # Final merge with GA4
+    try:
+        if not ga4_daily.empty:
+            master_df = pd.merge(merged_1, ga4_daily, on=["msid", "date"], how=ms.get("ga4_align", "left"))
+        else:
+            master_df = merged_1.copy()
+            vc.add("Info", "NO_GA4_MERGE", "GA4 data not available for merge")
+            
+        vc.checkpoint("merge_ga4", after_master=len(master_df))
+    except Exception as e:
+        vc.add("Warning", "FINAL_MERGE_FAIL", f"Final merge with GA4 failed: {e}")
+        master_df = merged_1.copy()
+
+    # Final data cleaning
+    try:
+        # Deduplicate
+        subset_cols = [c for c in ["date", "msid", "Query"] if c in master_df.columns]
+        if len(subset_cols) >= 2:  # Need at least 2 columns for meaningful dedup
+            dup_before = master_df.duplicated(subset=subset_cols).sum()
+            if dup_before > 0:
+                vc.add("Info", "DEDUP", "Duplicate rows removed", count=int(dup_before))
+                master_df = master_df.drop_duplicates(subset=subset_cols, keep="first").reset_index(drop=True)
+
+        # Impute missing values
+        if "CTR" in master_df.columns:
+            master_df["CTR"] = master_df["CTR"].fillna(0.0)
+            
+        if "Position" in master_df.columns:
+            miss = master_df["Position"].isna().sum()
+            if miss > 0:
+                master_df["Position"] = master_df["Position"].fillna(50.0)
+                vc.add("Info", "POSITION_IMPUTE", "Missing Position imputed to 50.0", rows=int(miss))
+
+        # Remove rows without titles
+        if "Title" in master_df.columns:
+            drop_title_n = master_df["Title"].isna().sum()
+            if drop_title_n > 0:
+                vc.add("Warning", "TITLE_MISSING", "Rows lacking Title dropped", rows=int(drop_title_n))
+                master_df = master_df.dropna(subset=["Title"])
+
+        master_df["_lineage"] = "GSC→PROD→GA4"
+        
+    except Exception as e:
+        vc.add("Warning", "CLEANING_FAIL", f"Final cleaning failed: {e}")
+
+    return master_df, vc
+
+# Process data with COMPLETE processing function
+with st.spinner("Processing & merging datasets..."):
+    master_df, vc_after = process_uploaded_files_complete(
+        prod_df_raw, ga4_df_raw, gsc_df_raw, 
+        prod_map, ga4_map, gsc_map,
+        vc_serialized=vc_serialized, 
+        merge_strategy=MERGE_STRATEGY
+    )
+
+if master_df is None or master_df.empty:
     st.error("Data processing failed. Please check your files and try again.")
+    if vc_after and not vc_after.to_dataframe().empty:
+        st.dataframe(vc_after.to_dataframe(), use_container_width=True, hide_index=True)
     st.stop()
 
-st.success(f"✅ Data processed successfully: {len(master_df):,} rows")
+# Post-merge validation report
+st.subheader("Post-merge Data Quality")
+post_df = vc_after.to_dataframe()
+if not post_df.empty:
+    st.dataframe(post_df, use_container_width=True, hide_index=True)
+    st.caption(f"Data Quality Score (post-merge): **{vc_after.quality_score():.0f} / 100**")
+    st.download_button(
+        "Download Post-merge Report (CSV)", 
+        data=post_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"postmerge_report_{pd.Timestamp.now().strftime('%Y%m%d')}.csv", 
+        mime="text/csv"
+    )
+
+# Master data preview - NOW SHOWS ALL DATA
+st.success(f"✅ Master dataset created: {master_df.shape[0]:,} rows × {master_df.shape[1]} columns")
+
+# Show date range info
+if "date" in master_df.columns:
+    try:
+        date_col = pd.to_datetime(master_df["date"], errors="coerce")
+        if date_col.notna().any():
+            min_date = date_col.min().date()
+            max_date = date_col.max().date()
+            st.caption(f"Date range: **{min_date}** to **{max_date}**")
+    except Exception:
+        pass
+
+# Sampling for large datasets (but processes ALL data first)
+if master_df.shape[0] > CONFIG["performance"]["sample_row_limit"]:
+    st.info(f"Large dataset detected. For interactive analysis, sampling {CONFIG['performance']['sample_row_limit']:,} rows.")
+    analysis_df = master_df.sample(
+        min(CONFIG["performance"]["sample_row_limit"], len(master_df)), 
+        random_state=CONFIG["performance"]["seed"]
+    )
+else:
+    analysis_df = master_df  # Use all data if under limit
+
+# Preview data
+st.subheader("Data Preview (First 10 rows)")
 st.dataframe(master_df.head(10), use_container_width=True, hide_index=True)
+
+# Show data summary
+with st.expander("Data Summary", expanded=True):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Rows", f"{len(master_df):,}")
+    with col2:
+        st.metric("Total Columns", f"{len(master_df.columns)}")
+    with col3:
+        if "msid" in master_df.columns:
+            st.metric("Unique Articles", f"{master_df['msid'].nunique():,}")
 
 if step == "3) Validate & Process":
     st.success("Data processing complete! Move to **Step 4) Configure & Analyze** to generate insights.")
-    st.stop()
-    # ============================
+    st.stop()    # ============================
 # PART 4/5: Core Analysis Modules
 # ============================
 
@@ -792,19 +1178,69 @@ def _pick_col(df, candidates):
     return None
 
 # Engagement vs Search Mismatch Analysis
+# In PART 4/5, update the engagement_mismatches function:
+
 def engagement_mismatches(df):
-    """Identify engagement vs search performance mismatches"""
+    """Identify engagement vs search performance mismatches using REAL data"""
     if df is None or df.empty:
         return ["No data available for analysis"]
     
-    # For demo purposes, return sample insights
-    sample_insights = [
-        "### 💎 Hidden Gem\n**MSID:** `101`  \n**Title:** Budget 2025 highlights explained  \n**Engagement Score:** **0.85** | **Search Score:** **0.25**  \n\n**Recommendations:**  \n- **SEO Optimization:** Expand title/H1 & better match search intent  \n- **Internal Linking:** Add links from high-authority pages  \n- **Content Expansion:** Add related sections and depth  \n\n*Goal: Leverage high engagement to improve search visibility*",
-        
-        "### ⚠️ Clickbait Risk\n**MSID:** `103`  \n**Title:** Monsoon updates: city-by-city guide  \n**Engagement Score:** **0.30** | **Search Score:** **0.82**  \n\n**Recommendations:**  \n- **Content Depth:** Address thin content issues  \n- **UX Improvement:** Enhance page speed & mobile experience  \n- **Title Alignment:** Ensure title promises match content  \n\n*Goal: Improve user experience to match search performance*"
-    ]
+    # Use REAL data from the processed dataframe
+    d = df.copy()
     
-    return sample_insights
+    # Check what columns we actually have
+    available_cols = d.columns.tolist()
+    
+    # If we don't have real engagement data, provide guidance
+    engagement_cols = [c for c in available_cols if any(x in c.lower() for x in ['engagement', 'duration', 'bounce'])]
+    search_cols = [c for c in available_cols if any(x in c.lower() for x in ['click', 'position', 'impression', 'ctr'])]
+    
+    if not engagement_cols and not search_cols:
+        return ["Your data doesn't contain typical engagement or search metrics. Please check your column mappings."]
+    
+    # Create insights based on actual data
+    insights = []
+    
+    # Analyze based on available data
+    if "Position" in d.columns and "CTR" in d.columns:
+        # Find pages with good position but low CTR
+        good_position_low_ctr = d[(d["Position"] <= 10) & (d["CTR"] < 0.02)]
+        if not good_position_low_ctr.empty:
+            for _, row in good_position_low_ctr.head(3).iterrows():
+                insight = f"""### ⚠️ Low CTR at Good Position
+**MSID:** `{row.get('msid', 'N/A')}`  
+**Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}  
+**Title:** {str(row.get('Title', 'Unknown'))[:80]}...
+
+**Recommendations:**  
+- **Title Optimization:** Test more compelling titles  
+- **Meta Description:** Improve snippet appeal  
+- **Rich Results:** Implement schema markup  
+
+*Goal: Convert high positions into more clicks*"""
+                insights.append(insight)
+    
+    if "userEngagementDuration" in d.columns:
+        # Find pages with high engagement
+        high_engagement = d.nlargest(3, "userEngagementDuration")
+        for _, row in high_engagement.iterrows():
+            insight = f"""### 💎 High Engagement Content
+**MSID:** `{row.get('msid', 'N/A')}`  
+**Avg. Duration:** {row['userEngagementDuration']:.1f}s  
+**Title:** {str(row.get('Title', 'Unknown'))[:80]}...
+
+**Recommendations:**  
+- **Content Expansion:** Add more depth to this popular topic  
+- **Internal Linking:** Link from high-traffic pages  
+- **Update Frequency:** Keep this content current  
+
+*Goal: Leverage engagement to improve rankings*"""
+            insights.append(insight)
+    
+    if not insights:
+        insights.append("No specific engagement-search mismatches detected. Your content appears well-balanced.")
+    
+    return insights
 
 def scatter_engagement_vs_search(df):
     """Create engagement vs search scatter plot"""
@@ -1132,3 +1568,4 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | Advanced SEO & Content Intelligence Platform")
+
