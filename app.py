@@ -1393,7 +1393,7 @@ else:
     st.info("No mismatch rows matched your thresholds and filters.")
 
 # Cleaner Scatter
-st.subheader("Engagement vs. Search Scatter Analysis")
+st.subheader("Module 2 : Engagement vs. Search Scatter Analysis")
 scatter_engagement_vs_search(filtered_df)
 
 st.divider()
@@ -1576,6 +1576,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
