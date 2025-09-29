@@ -1118,8 +1118,13 @@ if step == "3) Validate & Process":
 # ============================
 
 # Date filtering
+# ============================
+# PART 4/5: Core Analysis Modules - USING REAL DATA
+# ============================
+
+# Date filtering
 def filter_by_date(df, start_date, end_date):
-    """Filter dataframe by date range"""
+    """Filter dataframe by date range using REAL data"""
     if df is None or df.empty or "date" not in df.columns:
         return df
         
@@ -1127,13 +1132,16 @@ def filter_by_date(df, start_date, end_date):
     try:
         df_copy["date"] = pd.to_datetime(df_copy["date"], errors="coerce").dt.date
         mask = (df_copy["date"] >= start_date) & (df_copy["date"] <= end_date)
-        return df_copy[mask].copy()
+        filtered = df_copy[mask].copy()
+        st.info(f"Date filter applied: {len(filtered):,} rows from {start_date} to {end_date}")
+        return filtered
     except Exception as e:
         st.warning(f"Date filtering failed: {e}")
         return df_copy
 
-# Apply date filter (using demo data)
-filtered_df = master_df  # Using our demo data for now
+# Apply date filter to REAL data
+start_date, end_date = st.session_state.date_range
+filtered_df = filter_by_date(master_df, start_date, end_date)
 
 TH = st.session_state.thresholds
 EXPECTED_CTR = CONFIG["expected_ctr_by_rank"]
@@ -1179,37 +1187,32 @@ def _pick_col(df, candidates):
             return candidate
     return None
 
-# Engagement vs Search Mismatch Analysis
-# In PART 4/5, update the engagement_mismatches function:
-
+# Engagement vs Search Mismatch Analysis - USING REAL DATA
 def engagement_mismatches(df):
     """Identify engagement vs search performance mismatches using REAL data"""
     if df is None or df.empty:
         return ["No data available for analysis"]
     
-    # Use REAL data from the processed dataframe
     d = df.copy()
     
-    # Check what columns we actually have
+    # Check what columns we actually have in the REAL data
     available_cols = d.columns.tolist()
+    st.info(f"Available columns for analysis: {', '.join(available_cols)}")
     
-    # If we don't have real engagement data, provide guidance
-    engagement_cols = [c for c in available_cols if any(x in c.lower() for x in ['engagement', 'duration', 'bounce'])]
-    search_cols = [c for c in available_cols if any(x in c.lower() for x in ['click', 'position', 'impression', 'ctr'])]
-    
-    if not engagement_cols and not search_cols:
-        return ["Your data doesn't contain typical engagement or search metrics. Please check your column mappings."]
-    
-    # Create insights based on actual data
+    # Use REAL data to create insights
     insights = []
     
-    # Analyze based on available data
+    # Analysis 1: Position vs CTR analysis
     if "Position" in d.columns and "CTR" in d.columns:
-        # Find pages with good position but low CTR
-        good_position_low_ctr = d[(d["Position"] <= 10) & (d["CTR"] < 0.02)]
-        if not good_position_low_ctr.empty:
-            for _, row in good_position_low_ctr.head(3).iterrows():
-                insight = f"""### ⚠️ Low CTR at Good Position
+        # Remove rows with missing data
+        pos_ctr_data = d[["msid", "Position", "CTR", "Title"]].dropna()
+        
+        if not pos_ctr_data.empty:
+            # Find pages with good position but low CTR (opportunities)
+            good_position_low_ctr = pos_ctr_data[(pos_ctr_data["Position"] <= 10) & (pos_ctr_data["CTR"] < 0.03)]
+            if not good_position_low_ctr.empty:
+                for _, row in good_position_low_ctr.head(3).iterrows():
+                    insight = f"""### ⚠️ Low CTR at Good Position
 **MSID:** `{row.get('msid', 'N/A')}`  
 **Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}  
 **Title:** {str(row.get('Title', 'Unknown'))[:80]}...
@@ -1220,13 +1223,32 @@ def engagement_mismatches(df):
 - **Rich Results:** Implement schema markup  
 
 *Goal: Convert high positions into more clicks*"""
-                insights.append(insight)
+                    insights.append(insight)
+            
+            # Find pages with high CTR but poor position (hidden gems)
+            high_ctr_poor_position = pos_ctr_data[(pos_ctr_data["Position"] > 10) & (pos_ctr_data["CTR"] > 0.05)]
+            if not high_ctr_poor_position.empty:
+                for _, row in high_ctr_poor_position.head(2).iterrows():
+                    insight = f"""### 💎 High CTR but Poor Position
+**MSID:** `{row.get('msid', 'N/A')}`  
+**Position:** {row['Position']:.1f} | **CTR:** {row['CTR']:.2%}  
+**Title:** {str(row.get('Title', 'Unknown'))[:80]}...
+
+**Recommendations:**  
+- **Content Quality:** Improve depth and quality  
+- **Backlinks:** Build authoritative links  
+- **User Signals:** Enhance user experience  
+
+*Goal: Improve rankings for high-CTR content*"""
+                    insights.append(insight)
     
+    # Analysis 2: Engagement duration analysis
     if "userEngagementDuration" in d.columns:
-        # Find pages with high engagement
-        high_engagement = d.nlargest(3, "userEngagementDuration")
-        for _, row in high_engagement.iterrows():
-            insight = f"""### 💎 High Engagement Content
+        engagement_data = d[["msid", "userEngagementDuration", "Title"]].dropna()
+        if not engagement_data.empty:
+            high_engagement = engagement_data.nlargest(2, "userEngagementDuration")
+            for _, row in high_engagement.iterrows():
+                insight = f"""### 💎 High Engagement Content
 **MSID:** `{row.get('msid', 'N/A')}`  
 **Avg. Duration:** {row['userEngagementDuration']:.1f}s  
 **Title:** {str(row.get('Title', 'Unknown'))[:80]}...
@@ -1237,159 +1259,379 @@ def engagement_mismatches(df):
 - **Update Frequency:** Keep this content current  
 
 *Goal: Leverage engagement to improve rankings*"""
-            insights.append(insight)
+                insights.append(insight)
+    
+    # Analysis 3: Bounce rate analysis
+    if "bounceRate" in d.columns:
+        bounce_data = d[["msid", "bounceRate", "Title", "Position"]].dropna()
+        if not bounce_data.empty:
+            high_bounce_good_position = bounce_data[(bounce_data["bounceRate"] > 0.7) & (bounce_data["Position"] <= 15)]
+            if not high_bounce_good_position.empty:
+                for _, row in high_bounce_good_position.head(2).iterrows():
+                    insight = f"""### 🚨 High Bounce Rate at Good Position
+**MSID:** `{row.get('msid', 'N/A')}`  
+**Position:** {row['Position']:.1f} | **Bounce Rate:** {row['bounceRate']:.1%}  
+**Title:** {str(row.get('Title', 'Unknown'))[:80]}...
+
+**Recommendations:**  
+- **Content Match:** Ensure content matches search intent  
+- **Page Speed:** Improve loading times  
+- **Readability:** Enhance content structure  
+
+*Goal: Reduce bounce rate to improve rankings*"""
+                    insights.append(insight)
     
     if not insights:
-        insights.append("No specific engagement-search mismatches detected. Your content appears well-balanced.")
+        insights.append("No specific engagement-search mismatches detected. Your content appears well-balanced based on the available metrics.")
     
     return insights
 
 def scatter_engagement_vs_search(df):
-    """Create engagement vs search scatter plot"""
+    """Create engagement vs search scatter plot using REAL data"""
     if df is None or df.empty:
         st.info("No data available for scatter plot")
         return
         
-    # Create sample data for demo
-    sample_data = pd.DataFrame({
-        'engagement_score': [0.8, 0.6, 0.3, 0.9, 0.4, 0.7, 0.5, 0.2],
-        'search_score': [0.2, 0.5, 0.8, 0.3, 0.6, 0.4, 0.7, 0.9],
-        'L2_Category': ['Business', 'Sports', 'News', 'Business', 'Sports', 'News', 'Business', 'Sports'],
-        'Clicks': [100, 200, 150, 300, 250, 180, 220, 190],
-        'msid': [101, 102, 103, 104, 105, 106, 107, 108]
-    })
+    d = df.copy()
+    
+    # Use actual available columns
+    engagement_col = _pick_col(d, ["userEngagementDuration", "bounceRate"])
+    search_col = _pick_col(d, ["Position", "CTR", "Clicks"])
+    
+    if not engagement_col or not search_col:
+        st.info(f"Need both engagement ({engagement_col}) and search ({search_col}) metrics for scatter plot")
+        return
+    
+    # Prepare data for scatter plot
+    plot_data = d[["msid", "Title", "L1_Category", "L2_Category", engagement_col, search_col]].dropna()
+    
+    if plot_data.empty:
+        st.info("No complete data available for scatter plot after cleaning")
+        return
     
     if _HAS_PLOTLY:
         try:
             fig = px.scatter(
-                sample_data, 
-                x="engagement_score", 
-                y="search_score",
-                size="Clicks",
-                color="L2_Category",
-                hover_data=["msid"],
-                title="Engagement vs Search Performance (Sample Data)",
+                plot_data, 
+                x=engagement_col, 
+                y=search_col,
+                color="L1_Category" if "L1_Category" in plot_data.columns else None,
+                hover_data=["msid", "Title"],
+                title=f"Real Data: {engagement_col} vs {search_col}",
                 labels={
-                    "engagement_score": "Engagement Score",
-                    "search_score": "Search Score" 
+                    engagement_col: engagement_col,
+                    search_col: search_col
                 }
             )
             st.plotly_chart(fig, use_container_width=True, theme="streamlit")
             export_plot_html(fig, "engagement_vs_search")
+            
+            # Show data summary
+            st.caption(f"Showing {len(plot_data):,} data points from your actual dataset")
         except Exception as e:
             st.error(f"Failed to create scatter plot: {e}")
     else:
-        st.scatter_chart(sample_data, x="engagement_score", y="search_score")
+        st.scatter_chart(plot_data, x=engagement_col, y=search_col)
 
-# Category Performance Analysis
+# Category Performance Analysis - USING REAL DATA
 def category_heatmap(df, value_col, title):
-    """Create category performance heatmap"""
+    """Create category performance heatmap using REAL data"""
     if not _HAS_PLOTLY:
         st.info("Heatmap visualization requires Plotly")
         return
         
-    # Create sample data for demo
-    sample_data = pd.DataFrame({
-        'L1_Category': ['Business', 'Business', 'Sports', 'Sports', 'News', 'News'],
-        'L2_Category': ['Economy', 'Politics', 'Cricket', 'Football', 'National', 'International'],
-        'value': [15000, 12000, 25000, 18000, 8000, 9500]
-    })
+    if df is None or df.empty:
+        st.info("No data available for heatmap")
+        return
+        
+    d = df.copy()
+    
+    # Ensure category columns exist
+    if "L1_Category" not in d.columns:
+        d["L1_Category"] = "Uncategorized"
+    if "L2_Category" not in d.columns:
+        d["L2_Category"] = "Uncategorized"
+    if value_col not in d.columns:
+        st.info(f"Column '{value_col}' not found in your data")
+        return
     
     try:
+        # Aggregate REAL data
+        agg_data = d.groupby(["L1_Category", "L2_Category"]).agg(
+            value=(value_col, "sum")
+        ).reset_index()
+        
+        if agg_data.empty:
+            st.info(f"No {value_col} data available for heatmap after aggregation")
+            return
+            
         fig = px.density_heatmap(
-            sample_data, 
+            agg_data, 
             x="L1_Category", 
             y="L2_Category", 
             z="value", 
             color_continuous_scale="Viridis",
-            title=f"{title} (Sample Data)",
-            labels={"value": "Pageviews"}
+            title=f"{title} - Your Real Data",
+            labels={"value": value_col}
         )
         st.plotly_chart(fig, use_container_width=True, theme="streamlit")
         export_plot_html(fig, f"heatmap_{value_col}")
+        
+        # Show data summary
+        st.caption(f"Showing category distribution based on {len(d):,} rows of your actual data")
         
     except Exception as e:
         st.error(f"Failed to create heatmap: {e}")
 
 def analyze_category_performance(df):
-    """Analyze category-level performance"""
+    """Analyze category-level performance using REAL data"""
     if df is None or df.empty:
+        st.warning("No data available for category analysis")
         return pd.DataFrame()
     
-    # Create sample category analysis for demo
-    sample_categories = pd.DataFrame({
-        'L1_Category': ['Business', 'Sports', 'News', 'Entertainment'],
-        'L2_Category': ['Economy', 'Cricket', 'National', 'Movies'],
-        'total_articles': [45, 32, 28, 15],
-        'total_traffic': [150000, 250000, 80000, 60000],
-        'avg_engagement_duration': [45.2, 38.7, 52.1, 41.8],
-        'total_gsc_clicks': [12000, 18000, 6500, 4200],
-        'traffic_index': [0.9, 1.5, 0.5, 0.4],
-        'engagement_index': [1.1, 0.9, 1.3, 1.0],
-        'quadrant': ['Workhorses', 'Stars', 'Hidden Gems', 'Underperformers']
-    })
+    d = df.copy()
     
-    return sample_categories
+    # Ensure category columns exist
+    if "L1_Category" not in d.columns:
+        d["L1_Category"] = "Uncategorized"
+    if "L2_Category" not in d.columns:
+        d["L2_Category"] = "Uncategorized"
+    if "msid" not in d.columns:
+        d["msid"] = range(len(d))
+    
+    # Identify available metrics in REAL data
+    engagement_col = _pick_col(d, ["userEngagementDuration", "engagement_duration"])
+    pageviews_col = _pick_col(d, ["screenPageViews", "pageviews"])
+    users_col = _pick_col(d, ["totalUsers", "users"])
+    clicks_col = _pick_col(d, ["Clicks", "clicks"])
+    impressions_col = _pick_col(d, ["Impressions", "impr"])
+    
+    if not any([engagement_col, pageviews_col, users_col, clicks_col, impressions_col]):
+        st.warning("No performance metrics found for category analysis")
+        return pd.DataFrame()
+    
+    # Prepare numeric columns
+    numeric_cols = [c for c in [engagement_col, pageviews_col, users_col, clicks_col, impressions_col] if c]
+    for col in numeric_cols:
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+    
+    # Build aggregation dictionary based on available columns
+    agg_dict = {"msid": "nunique"}  # Count unique articles
+    
+    # Add available metrics to aggregation
+    if pageviews_col:
+        agg_dict[pageviews_col] = "sum"
+    elif users_col:
+        agg_dict[users_col] = "sum"
+        
+    if engagement_col:
+        agg_dict[engagement_col] = "mean"
+        
+    if clicks_col:
+        agg_dict[clicks_col] = "sum"
+        
+    if impressions_col:
+        agg_dict[impressions_col] = "sum"
+    
+    # Group by categories using REAL data
+    try:
+        grouped = (d.groupby(["L1_Category", "L2_Category"])
+                     .agg(agg_dict)
+                     .reset_index())
+        
+        # Rename columns for clarity
+        column_rename = {"msid": "total_articles"}
+        if pageviews_col:
+            column_rename[pageviews_col] = "total_traffic"
+        elif users_col:
+            column_rename[users_col] = "total_traffic"
+        if engagement_col:
+            column_rename[engagement_col] = "avg_engagement_duration"
+        if clicks_col:
+            column_rename[clicks_col] = "total_gsc_clicks"
+        if impressions_col:
+            column_rename[impressions_col] = "total_impressions"
+            
+        grouped = grouped.rename(columns=column_rename)
+        
+        # Calculate performance indices if we have traffic data
+        if "total_traffic" in grouped.columns and len(grouped) > 0:
+            site_avg_traffic = grouped["total_traffic"].mean()
+            if site_avg_traffic > 0:
+                grouped["traffic_index"] = grouped["total_traffic"] / site_avg_traffic
+            else:
+                grouped["traffic_index"] = 0
+                
+        if "avg_engagement_duration" in grouped.columns and len(grouped) > 0:
+            site_avg_eng = grouped["avg_engagement_duration"].mean()
+            if site_avg_eng > 0:
+                grouped["engagement_index"] = grouped["avg_engagement_duration"] / site_avg_eng
+            else:
+                grouped["engagement_index"] = 0
+        
+        # Classify quadrants if we have both indices
+        def classify_quadrant(row):
+            if "traffic_index" not in row or "engagement_index" not in row:
+                return "N/A"
+                
+            traffic_high = row["traffic_index"] >= 1.0
+            engagement_high = row["engagement_index"] >= 1.0
+            
+            if traffic_high and engagement_high:
+                return "Stars"
+            elif not traffic_high and engagement_high:
+                return "Hidden Gems" 
+            elif traffic_high and not engagement_high:
+                return "Workhorses"
+            else:
+                return "Underperformers"
+                
+        if "traffic_index" in grouped.columns and "engagement_index" in grouped.columns:
+            grouped["quadrant"] = grouped.apply(classify_quadrant, axis=1)
+        else:
+            grouped["quadrant"] = "N/A"
+            
+        st.success(f"✅ Category analysis completed on {len(d):,} rows of real data")
+        return grouped
+        
+    except Exception as e:
+        st.error(f"Category analysis failed: {e}")
+        return pd.DataFrame()
 
-# Trends & Forecasting
+# Trends & Forecasting - USING REAL DATA
 def forecast_series(daily_series, periods=14):
-    """Generate time series forecasts"""
+    """Generate time series forecasts using REAL data"""
     if daily_series is None or len(daily_series) < 7:
+        st.warning("Need at least 7 days of data for forecasting")
         return None
         
-    # Create sample forecast for demo
-    future_dates = pd.date_range(
-        start=pd.Timestamp.now() + pd.Timedelta(days=1), 
-        periods=periods, 
-        freq="D"
-    )
-    
-    base_value = 1000  # Sample base value
-    forecast_values = [base_value * (1 + 0.05 * i) for i in range(periods)]  # 5% growth
-    
-    return pd.DataFrame({
-        "date": future_dates,
-        "forecast": forecast_values,
-        "low": [v * 0.8 for v in forecast_values],
-        "high": [v * 1.2 for v in forecast_values]
-    })
+    try:
+        # Ensure daily frequency and handle missing values
+        daily_series = daily_series.asfreq("D").fillna(method="ffill").fillna(0)
+        
+        if _HAS_STM and len(daily_series) >= 14:
+            try:
+                # Use Holt-Winters exponential smoothing
+                seasonal_periods = min(7, len(daily_series))
+                model = ExponentialSmoothing(
+                    daily_series, 
+                    trend="add", 
+                    seasonal="add", 
+                    seasonal_periods=seasonal_periods
+                )
+                fit = model.fit(optimized=True)
+                forecast = fit.forecast(periods)
+                
+                # Calculate confidence intervals
+                residuals = daily_series - fit.fittedvalues
+                std_dev = residuals.std()
+                lower = forecast - 1.96 * std_dev
+                upper = forecast + 1.96 * std_dev
+                
+                return pd.DataFrame({
+                    "date": forecast.index, 
+                    "forecast": forecast.values, 
+                    "low": lower.values, 
+                    "high": upper.values
+                })
+                
+            except Exception as e:
+                st.info(f"Advanced forecasting unavailable, using simple method: {e}")
+        
+        # Fallback: simple moving average
+        moving_avg = daily_series.rolling(window=7, min_periods=1).mean()
+        last_value = moving_avg.iloc[-1] if not moving_avg.empty else daily_series.mean()
+        
+        future_dates = pd.date_range(
+            start=daily_series.index.max() + pd.Timedelta(days=1), 
+            periods=periods, 
+            freq="D"
+        )
+        
+        # Simple linear projection based on recent trend
+        recent_trend = daily_series.tail(7).pct_change().mean()
+        forecast_values = [last_value * (1 + recent_trend) ** i for i in range(periods)]
+        
+        return pd.DataFrame({
+            "date": future_dates,
+            "forecast": forecast_values,
+            "low": [v * 0.8 for v in forecast_values],  # 20% lower bound
+            "high": [v * 1.2 for v in forecast_values]  # 20% upper bound
+        })
+        
+    except Exception as e:
+        st.error(f"Forecasting failed: {e}")
+        return None
 
 def time_series_trends(df, metric_col, title):
-    """Create time series trend visualization"""
-    if not _HAS_PLOTLY:
-        st.info("Time series charts require Plotly")
+    """Create time series trend visualization using REAL data"""
+    if df is None or df.empty or "date" not in df.columns:
+        st.info("Time series analysis requires date column and data")
         return
         
-    # Create sample time series data for demo
-    dates = pd.date_range(start='2024-01-01', end='2024-02-15', freq='D')
-    values = [1000 + i * 20 + np.random.randint(-100, 100) for i in range(len(dates))]
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d = d.dropna(subset=["date"])
     
-    sample_data = pd.DataFrame({
-        'date': dates,
-        'value': values
-    })
+    if d.empty or metric_col not in d.columns:
+        st.info(f"No valid {metric_col} data available for time series")
+        return
+        
+    # Prepare metric
+    d[metric_col] = pd.to_numeric(d[metric_col], errors="coerce").fillna(0)
     
-    try:
-        fig = px.line(
-            sample_data, 
-            x="date", 
-            y="value", 
-            title=f"{title} (Sample Data)",
-            labels={"value": metric_col.replace("_", " ").title()}
-        )
-        st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-        export_plot_html(fig, f"timeseries_{metric_col}")
-    except Exception as e:
-        st.error(f"Failed to create time series chart: {e}")
+    # Aggregate by date using REAL data
+    daily_data = d.groupby("date")[metric_col].sum().reset_index()
+    
+    if daily_data.empty:
+        st.info(f"No {metric_col} data available after aggregation")
+        return
+    
+    if _HAS_PLOTLY:
+        try:
+            fig = px.line(
+                daily_data, 
+                x="date", 
+                y=metric_col, 
+                title=f"{title} - Your Real Data",
+                labels={metric_col: metric_col.replace("_", " ").title()}
+            )
+            
+            # Add range slider for better navigation
+            fig.update_layout(
+                xaxis=dict(
+                    rangeselector=dict(
+                        buttons=list([
+                            dict(count=7, label="1w", step="day", stepmode="backward"),
+                            dict(count=1, label="1m", step="month", stepmode="backward"),
+                            dict(step="all")
+                        ])
+                    ),
+                    rangeslider=dict(visible=True),
+                    type="date"
+                )
+            )
+            
+            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+            export_plot_html(fig, f"timeseries_{metric_col}")
+            
+            # Show data summary
+            date_range = f"{daily_data['date'].min().strftime('%Y-%m-%d')} to {daily_data['date'].max().strftime('%Y-%m-%d')}"
+            st.caption(f"Showing {len(daily_data)} days of real {metric_col} data from {date_range}")
+            
+        except Exception as e:
+            st.error(f"Failed to create time series chart: {e}")
+    else:
+        st.line_chart(daily_data.set_index("date")[metric_col])
 
 # ============================
 # MAIN ANALYSIS UI
 # ============================
 
-st.header("📊 Advanced Analytics & Insights")
+st.header("📊 Advanced Analytics & Insights - REAL DATA ANALYSIS")
 
-# Module 1: Engagement vs Search Mismatch
-st.subheader("Module 1: Engagement vs Search Performance Mismatch")
+# Module 4: Engagement vs Search Mismatch
+st.subheader("Module 4: Engagement vs Search Performance Mismatch")
 st.caption("Identify content with high engagement but poor search performance (Hidden Gems) and vice versa (Clickbait Risks)")
 
 engagement_cards = run_module_safely(
@@ -1412,110 +1654,206 @@ st.divider()
 # ============================
 
 # Module 2: Category Performance
-st.subheader("Module 2: Category Performance Analysis")
-st.caption("Understand how different content categories perform across traffic and engagement metrics")
+# ============================
+# PART 5/5: Complete Analysis & Export - USING REAL DATA
+# ============================
+
+# Module 5: Category Performance - COMPLETE ANALYSIS
+st.subheader("Module 5: Category Performance Analysis - COMPLETE DATA")
+st.caption("Complete analysis of all your content categories using 100% of your data")
 
 category_results = run_module_safely(
     "Category Performance", 
     analyze_category_performance, 
-    filtered_df
+    filtered_df  # Using ALL filtered data, not samples
 )
 
 if isinstance(category_results, pd.DataFrame) and not category_results.empty:
+    st.success(f"✅ Analyzed {len(category_results)} categories from your complete dataset")
     st.dataframe(category_results, use_container_width=True, hide_index=True)
     
-    # Category visualizations
+    # Category visualizations using REAL data
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("Category Traffic Distribution")
-        run_module_safely(
-            "Traffic Heatmap", 
-            category_heatmap, 
-            filtered_df, "screenPageViews", "Category Traffic Heatmap"
-        )
+        st.subheader("Category Traffic Distribution - Real Data")
+        # Use available traffic metric
+        traffic_col = _pick_col(filtered_df, ["screenPageViews", "totalUsers", "Clicks", "Impressions"])
+        if traffic_col:
+            run_module_safely(
+                "Traffic Heatmap", 
+                category_heatmap, 
+                filtered_df, traffic_col, "Category Traffic"
+            )
+        else:
+            st.info("No traffic metrics available for heatmap")
     
     with col2:
-        # Top categories bar chart
+        # Top categories bar chart using REAL data
         if "total_gsc_clicks" in category_results.columns:
-            st.subheader("Top Categories by GSC Clicks")
+            st.subheader("Top Categories by GSC Clicks - Real Data")
             top_categories = category_results.nlargest(10, "total_gsc_clicks")
             if not top_categories.empty:
-                st.bar_chart(top_categories.set_index("L2_Category")["total_gsc_clicks"])
+                # Use Plotly for better visualization
+                if _HAS_PLOTLY:
+                    fig = px.bar(
+                        top_categories,
+                        x="L2_Category",
+                        y="total_gsc_clicks",
+                        title="Top Categories by GSC Clicks",
+                        color="L1_Category"
+                    )
+                    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+                else:
+                    st.bar_chart(top_categories.set_index("L2_Category")["total_gsc_clicks"])
+        elif "total_traffic" in category_results.columns:
+            st.subheader("Top Categories by Traffic - Real Data")
+            top_categories = category_results.nlargest(10, "total_traffic")
+            if not top_categories.empty:
+                if _HAS_PLOTLY:
+                    fig = px.bar(
+                        top_categories,
+                        x="L2_Category",
+                        y="total_traffic",
+                        title="Top Categories by Traffic",
+                        color="L1_Category"
+                    )
+                    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+                else:
+                    st.bar_chart(top_categories.set_index("L2_Category")["total_traffic"])
 else:
-    st.info("Category performance analysis requires sufficient category and metric data")
+    st.info("Category performance analysis requires category columns and performance metrics in your data")
 
 st.divider()
 
-# Module 3: Trends & Forecasting
-st.subheader("Module 3: Trends & Forecasting")
-st.caption("Analyze historical trends and generate performance forecasts")
+# Module 6: Trends & Forecasting - USING REAL AUGUST 2025 DATA
+st.subheader("Module 6: Trends & Forecasting - Your August 2025 Data")
+st.caption("Analyze historical trends and generate performance forecasts using your actual data")
 
-# Create sample time series data for forecasting demo
-sample_dates = pd.date_range(start='2024-01-01', periods=45, freq='D')
-sample_traffic = [1000 + i * 25 + np.random.randint(-200, 200) for i in range(len(sample_dates))]
-sample_series = pd.Series(sample_traffic, index=sample_dates)
+if "date" in filtered_df.columns and not filtered_df.empty:
+    # Prepare time series data from REAL August 2025 data
+    ts_data = filtered_df.copy()
+    ts_data["date"] = pd.to_datetime(ts_data["date"], errors="coerce")
+    ts_data = ts_data.dropna(subset=["date"])
+    
+    if not ts_data.empty:
+        # Show actual date range from user's data
+        actual_start = ts_data["date"].min().strftime('%Y-%m-%d')
+        actual_end = ts_data["date"].max().strftime('%Y-%m-%d')
+        st.info(f"Your data date range: **{actual_start}** to **{actual_end}**")
+        
+        # Select primary metric for forecasting from available columns
+        primary_metric = _pick_col(ts_data, ["totalUsers", "screenPageViews", "Clicks", "Impressions"])
+        
+        if primary_metric:
+            # Daily aggregation from REAL data
+            daily_series = ts_data.groupby("date")[primary_metric].sum().sort_index()
+            
+            st.subheader(f"{primary_metric} Trends - Your August 2025 Data")
+            
+            # Show actual time series from user's data
+            run_module_safely(
+                f"{primary_metric} Time Series", 
+                time_series_trends, 
+                ts_data, primary_metric, f"{primary_metric} Over Time"
+            )
+            
+            # Forecasting section
+            if len(daily_series) >= 7:  # Need at least 7 days for meaningful analysis
+                st.subheader(f"14-Day Forecast - Based on Your August 2025 Data")
+                
+                forecast_data = forecast_series(daily_series, periods=14)
+                
+                if forecast_data is not None and _HAS_PLOTLY:
+                    # Create forecast visualization using REAL data
+                    historical_df = daily_series.reset_index().rename(columns={"index": "date", primary_metric: "value"})
+                    
+                    fig = go.Figure()
+                    
+                    # Historical data from user's August 2025
+                    fig.add_trace(go.Scatter(
+                        x=historical_df["date"],
+                        y=historical_df["value"],
+                        name="Your Historical Data",
+                        line=dict(color="blue", width=3)
+                    ))
+                    
+                    # Forecast based on user's data
+                    fig.add_trace(go.Scatter(
+                        x=forecast_data["date"],
+                        y=forecast_data["forecast"],
+                        name="Forecast",
+                        line=dict(color="red", width=3, dash="dash")
+                    ))
+                    
+                    # Confidence interval
+                    fig.add_trace(go.Scatter(
+                        x=pd.concat([forecast_data["date"], forecast_data["date"][::-1]]),
+                        y=pd.concat([forecast_data["high"], forecast_data["low"][::-1]]),
+                        fill="toself",
+                        fillcolor="rgba(255,0,0,0.2)",
+                        line=dict(color="rgba(255,255,255,0)"),
+                        name="Confidence Interval",
+                        showlegend=True
+                    ))
+                    
+                    fig.update_layout(
+                        title=f"{primary_metric} - 14-Day Forecast Based on Your August 2025 Data",
+                        xaxis_title="Date",
+                        yaxis_title=primary_metric,
+                        hovermode="x unified"
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+                    export_plot_html(fig, f"forecast_{primary_metric}")
+                    
+                    # Show forecast details
+                    with st.expander("Forecast Details", expanded=False):
+                        st.dataframe(forecast_data, use_container_width=True, hide_index=True)
+                        st.caption("Forecast generated from your actual August 2025 data patterns")
+                
+                elif len(daily_series) < 7:
+                    st.warning(f"Need at least 7 days of {primary_metric} data for forecasting. You have {len(daily_series)} days.")
+            else:
+                st.info(f"Need at least 7 days of {primary_metric} data for forecasting")
+        else:
+            st.info("No suitable metrics found for trend analysis in your data")
+    else:
+        st.info("No valid date data available for trend analysis")
+else:
+    st.info("Date column required for trend analysis and forecasting")
 
-# Generate forecast
-forecast_data = forecast_series(sample_series, periods=14)
-
-if forecast_data is not None and _HAS_PLOTLY:
-    # Create forecast visualization
-    fig = go.Figure()
+# Additional real metric trends
+st.subheader("Additional Metric Trends - Your Real Data")
+if "date" in filtered_df.columns and not filtered_df.empty:
+    # Show available metrics for additional trends
+    available_metrics = []
+    for metric in ["Impressions", "CTR", "Position", "userEngagementDuration", "bounceRate"]:
+        if metric in filtered_df.columns:
+            available_metrics.append(metric)
     
-    # Historical data
-    fig.add_trace(go.Scatter(
-        x=sample_series.index,
-        y=sample_series.values,
-        name="Historical",
-        line=dict(color="blue", width=2)
-    ))
-    
-    # Forecast
-    fig.add_trace(go.Scatter(
-        x=forecast_data["date"],
-        y=forecast_data["forecast"],
-        name="Forecast",
-        line=dict(color="red", width=2, dash="dash")
-    ))
-    
-    # Confidence interval
-    fig.add_trace(go.Scatter(
-        x=pd.concat([forecast_data["date"], forecast_data["date"][::-1]]),
-        y=pd.concat([forecast_data["high"], forecast_data["low"][::-1]]),
-        fill="toself",
-        fillcolor="rgba(255,0,0,0.2)",
-        line=dict(color="rgba(255,255,255,0)"),
-        name="Confidence Interval",
-        showlegend=True
-    ))
-    
-    fig.update_layout(
-        title="Traffic - 14-Day Forecast (Sample Data)",
-        xaxis_title="Date",
-        yaxis_title="Pageviews",
-        hovermode="x unified"
-    )
-    
-    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-    export_plot_html(fig, "forecast_traffic")
-
-# Additional time series trends
-st.subheader("Additional Metric Trends")
-run_module_safely(
-    "Impressions Trend", 
-    time_series_trends, 
-    filtered_df, "Impressions", "Impressions Over Time"
-)
+    if available_metrics:
+        # Show up to 2 additional metrics
+        for metric in available_metrics[:2]:
+            if metric != primary_metric:  # Don't repeat the primary metric
+                run_module_safely(
+                    f"Trend {metric}", 
+                    time_series_trends, 
+                    ts_data, metric, f"{metric} Over Time"
+                )
+    else:
+        st.info("No additional metrics available for trend analysis")
+else:
+    st.info("No date data available for additional trends")
 
 # ============================
-# EXPORT & SUMMARY
+# EXPORT & SUMMARY - REAL DATA
 # ============================
 
 st.divider()
-st.subheader("📤 Export Results")
+st.subheader("📤 Export Results - Your Real Data")
 
-# Create export options
+# Create export options based on REAL data
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -1535,41 +1873,55 @@ with col2:
         )
 
 with col3:
-    # Summary statistics
-    with st.expander("Analysis Summary"):
-        st.metric("Total Articles Analyzed", "4")
-        st.metric("Total GSC Clicks", "40,700")
-        st.metric("Hidden Gems Identified", "2")
+    # Summary statistics from REAL data
+    with st.expander("Real Data Summary", expanded=True):
+        if not filtered_df.empty:
+            st.metric("Total Rows Analyzed", f"{len(filtered_df):,}")
+            if "msid" in filtered_df.columns:
+                st.metric("Unique Articles", f"{filtered_df['msid'].nunique():,}")
+            if "Clicks" in filtered_df.columns:
+                total_clicks = filtered_df["Clicks"].sum()
+                st.metric("Total GSC Clicks", f"{total_clicks:,}")
 
-# Final recommendations
+# Final recommendations based on REAL data
 st.divider()
-st.subheader("🎯 Key Recommendations")
+st.subheader("🎯 Key Recommendations - Based on Your Real Data")
 
 if isinstance(engagement_cards, list) and len(engagement_cards) > 0:
-    st.success("**Priority Actions:**")
+    st.success("**Priority Actions Based on Your Data:**")
     
-    hidden_gems = sum(1 for card in card if "Hidden Gem" in card for card in engagement_cards)
-    clickbait_risks = sum(1 for card in card if "Clickbait Risk" in card for card in engagement_cards)
+    # Count actual insights from real data
+    hidden_gems = sum(1 for card in engagement_cards if "Hidden Gem" in card)
+    clickbait_risks = sum(1 for card in engagement_cards if "Clickbait Risk" in card)
+    low_ctr = sum(1 for card in engagement_cards if "Low CTR" in card)
+    high_bounce = sum(1 for card in engagement_cards if "High Bounce" in card)
     
     if hidden_gems > 0:
         st.info(f"• **Optimize {hidden_gems} Hidden Gem(s):** Improve SEO for high-engagement content")
     if clickbait_risks > 0:
         st.warning(f"• **Fix {clickbait_risks} Clickbait Risk(s):** Enhance content quality and UX")
+    if low_ctr > 0:
+        st.warning(f"• **Address {low_ctr} Low CTR Issue(s):** Improve title and meta descriptions")
+    if high_bounce > 0:
+        st.error(f"• **Reduce {high_bounce} High Bounce Rate(s):** Enhance content relevance and UX")
     
     if isinstance(category_results, pd.DataFrame):
         stars = category_results[category_results["quadrant"] == "Stars"]
         workhorses = category_results[category_results["quadrant"] == "Workhorses"]
+        hidden_gem_cats = category_results[category_results["quadrant"] == "Hidden Gems"]
         
         if not stars.empty:
-            st.success(f"• **Leverage {len(stars)} Star Category(ies):** Scale successful content patterns")
+            st.success(f"• **Leverage {len(stars)} Star Category(ies):** {', '.join(stars['L1_Category'].tolist())}")
         if not workhorses.empty:
-            st.info(f"• **Optimize {len(workhorses)} Workhorse Category(ies):** Improve engagement on high-traffic content")
+            st.info(f"• **Optimize {len(workhorses)} Workhorse Category(ies):** {', '.join(workhorses['L1_Category'].tolist())}")
+        if not hidden_gem_cats.empty:
+            st.info(f"• **Promote {len(hidden_gem_cats)} Hidden Gem Category(ies):** {', '.join(hidden_gem_cats['L1_Category'].tolist())}")
 else:
-    st.info("Upload and process your data to get personalized recommendations")
+    st.info("Upload and process your data to get personalized recommendations based on your actual content performance")
 
 # Footer
 st.markdown("---")
-st.caption("GrowthOracle AI v2.0 | Advanced SEO & Content Intelligence Platform")
+st.caption("GrowthOracle AI v2.0 | Analyzing Your Real Data | August 2025 Insights")
 
 
 
