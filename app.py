@@ -1090,6 +1090,38 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
         )
         if x == "Position":
             fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
+# --- Make directions obvious ---
+def _axis_titles(x_col: str, y_col: str):
+    if x_col == "Position":
+        xlab = "Position (lower is better ←)"
+        dircap = f"Left = better rank, Up = higher {y_col}"
+        good_x_paper = 0.05   # left
+        bad_x_paper  = 0.95   # right
+    else:  # CTR
+        xlab = "CTR (higher →)"
+        dircap = f"Right = higher CTR, Up = higher {y_col}"
+        good_x_paper = 0.95   # right
+        bad_x_paper  = 0.05   # left
+    ylab = f"{y_col} (higher ↑)"
+    return xlab, ylab, dircap, good_x_paper, bad_x_paper
+
+xlab, ylab, dircap, good_x, bad_x = _axis_titles(x, y)
+
+fig.update_xaxes(title_text=xlab)
+fig.update_yaxes(title_text=ylab)
+
+# Corner helper tags (paper coords: 0..1); just small hints, not quadrants
+fig.add_annotation(xref="paper", yref="paper", x=good_x, y=0.95,
+                   text="✅ Good", showarrow=False,
+                   bgcolor="rgba(0,200,0,0.12)", bordercolor="rgba(0,150,0,0.4)", borderwidth=1)
+fig.add_annotation(xref="paper", yref="paper", x=bad_x, y=0.05,
+                   text="⚠️ Needs work", showarrow=False,
+                   bgcolor="rgba(255,0,0,0.08)", bordercolor="rgba(200,0,0,0.35)", borderwidth=1)
+
+# Simple one-line legend under the controls
+st.caption(
+    f"**How to read:** {dircap}.  Bigger bubble = more {size_col}.  Color = {color_col}."
+)
 
     st.plotly_chart(fig, use_container_width=True, theme="streamlit")
     if "export_plot_html" in globals(): export_plot_html(fig, "engagement_vs_search")
@@ -1594,4 +1626,5 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
