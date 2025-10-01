@@ -1115,38 +1115,101 @@ def export_plot_html(fig, name: str):
     except Exception as e:
         st.warning(f"Failed to export plot: {e}")
 
-def category_treemap(df, value_col, title):
+def category_treemap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool):
     if not _HAS_PLOTLY:
-        st.info("Treemap requires Plotly."); return
-    if df is None or df.empty or value_col not in df.columns:
-        st.info(f"No data for treemap (value column: {value_col})."); return
-    try:
-        agg = df.groupby(["L1_Category","L2_Category"], as_index=False)[value_col].sum()
-        fig = px.treemap(
-            agg, path=["L1_Category","L2_Category"], values=value_col, title=title
-        )
-        fig.update_traces(textinfo="label+value")
-        st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-        export_plot_html(fig, f"treemap_{value_col}")
-    except Exception as e:
-        st.error(f"Failed to create treemap: {e}")
+        st.info("Treemap requires Plotly.")
+        return
+    if cat_df is None or cat_df.empty:
+        st.info("No category data.")
+        return
 
-def category_heatmap(df, value_col, title):
+    pretty, col, asc = _resolve_cat_metric(metric_choice, per_article)
+
+    df = cat_df.copy()
+    # Area value
+    if metric_choice == "Avg Position":
+        # Area by volume (impressions) when viewing a ratio-like metric
+        if "total_impressions" in df.columns:
+            df["metric_value"] = pd.to_numeric(df["total_impressions"], errors="coerce").fillna(0)
+        else:
+            df["metric_value"] = 1
+        color_col = "avg_position_weighted"
+        color_title = "Avg Position (lower better)"
+        color_scale = "RdYlGn_r"  # reversed (green = low number)
+    else:
+        df["metric_value"] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        color_col = "ctr_weighted" if "ctr_weighted" in df.columns else "metric_value"
+        color_title = "Weighted CTR"
+        color_scale = "RdYlGn"
+
+    fig = px.treemap(
+        df,
+        path=["L1_Category","L2_Category"],
+        values="metric_value",
+        color=color_col,
+        color_continuous_scale=color_scale,
+        hover_data={
+            "total_articles": True,
+            "total_gsc_clicks": True,
+            "total_impressions": True,
+            "total_pageviews": True,
+            "total_users": True,
+            "avg_position_weighted": ":.2f",
+            "ctr_weighted": ":.2%"
+        },
+        title=f"Treemap — {pretty} (color = {color_title})"
+    )
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+    if "export_plot_html" in globals():
+        export_plot_html(fig, f"treemap_{col}")
+
+    download_df_button(
+        df[["L1_Category","L2_Category","total_articles","total_gsc_clicks","total_impressions",
+            "total_pageviews","total_users","avg_position_weighted","ctr_weighted"]],
+        f"treemap_data_{col}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        "Download treemap data (CSV)"
+    )
+
+def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool):
     if not _HAS_PLOTLY:
-        st.info("Heatmap requires Plotly."); return
-    if df is None or df.empty or value_col not in df.columns:
-        st.info(f"No data for heatmap (value column: {value_col})."); return
+        st.info("Heatmap requires Plotly.")
+        return
+    if cat_df is None or cat_df.empty:
+        st.info("No category data.")
+        return
+
+    pretty, col, asc = _resolve_cat_metric(metric_choice, per_article)
+    df = cat_df.copy()
+
+    # Pivot: rows=L2, cols=L1 (keeps labels readable)
     try:
-        agg_data = df.groupby(["L1_Category", "L2_Category"]).agg(value=(value_col, "sum")).reset_index()
-        if agg_data.empty: st.info("No data after aggregation for heatmap."); return
-        fig = px.density_heatmap(
-            agg_data, x="L1_Category", y="L2_Category", z="value",
-            color_continuous_scale="YlGnBu", title=title, labels={"value": value_col}
-        )
-        st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-        export_plot_html(fig, f"heatmap_{value_col}")
-    except Exception as e:
-        st.error(f"Failed to create heatmap: {e}")
+        pv = df.pivot_table(
+            index="L2_Category", columns="L1_Category",
+            values=col, aggfunc="sum"
+        ).fillna(0)
+    except Exception:
+        st.info("Not enough category variety for a heatmap.")
+        return
+
+    # Build fig
+    color_scale = "RdYlGn_r" if metric_choice == "Avg Position" else "RdYlGn"
+    fig = px.imshow(
+        pv,
+        labels=dict(x="L1 Category", y="L2 Category", color=pretty),
+        color_continuous_scale=color_scale,
+        title=f"Heatmap — {pretty}"
+    )
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+    if "export_plot_html" in globals():
+        export_plot_html(fig, f"heatmap_{col}")
+
+    # Download the matrix used
+    pv_reset = pv.reset_index()
+    download_df_button(
+        pv_reset,
+        f"heatmap_matrix_{col}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        "Download heatmap matrix (CSV)"
+    )
 
 def _series_mode(series: pd.Series):
     try:
@@ -1155,52 +1218,95 @@ def _series_mode(series: pd.Series):
     except Exception:
         return None
 
-def analyze_category_performance(df):
-    """Expanded with totalUsers, avg session duration, bounceRate, top Query, avg Position."""
-    if df is None or df.empty: return pd.DataFrame()
+def analyze_category_performance(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate category-level performance + weighted metrics."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     d = df.copy()
-    agg_dict = {
-        "msid": pd.NamedAgg(column="msid", aggfunc="nunique")
-    }
-    rename_map = {"msid": "total_articles"}
+    # Ensure categories exist
+    for c in ["L1_Category", "L2_Category"]:
+        if c not in d.columns:
+            d[c] = "Uncategorized"
 
-    # sums
-    if "Clicks" in d.columns:
-        agg_dict["Clicks"] = pd.NamedAgg(column="Clicks", aggfunc="sum")
-        rename_map["Clicks"] = "total_gsc_clicks"
-    if "screenPageViews" in d.columns:
-        agg_dict["screenPageViews"] = pd.NamedAgg(column="screenPageViews", aggfunc="sum")
-        rename_map["screenPageViews"] = "total_pageviews"
-    if "Impressions" in d.columns:
-        agg_dict["Impressions"] = pd.NamedAgg(column="Impressions", aggfunc="sum")
-        rename_map["Impressions"] = "total_impressions"
-    if "totalUsers" in d.columns:
-        agg_dict["totalUsers"] = pd.NamedAgg(column="totalUsers", aggfunc="sum")
-        rename_map["totalUsers"] = "total_users"
+    # Numericize
+    for c in ["Clicks","Impressions","screenPageViews","totalUsers","userEngagementDuration","Position","CTR"]:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
 
-    # means
-    if "userEngagementDuration" in d.columns:
-        agg_dict["userEngagementDuration"] = pd.NamedAgg(column="userEngagementDuration", aggfunc="mean")
-        rename_map["userEngagementDuration"] = "avg_session_duration_s"
-    if "bounceRate" in d.columns:
-        agg_dict["bounceRate"] = pd.NamedAgg(column="bounceRate", aggfunc="mean")
-        rename_map["bounceRate"] = "avg_bounce_rate"
-    if "Position" in d.columns:
-        agg_dict["Position"] = pd.NamedAgg(column="Position", aggfunc="mean")
-        rename_map["Position"] = "avg_position"
+    # Fallback CTR if missing
+    if "CTR" not in d.columns and {"Clicks","Impressions"}.issubset(d.columns):
+        d["CTR"] = (d["Clicks"] / d["Impressions"].replace(0, np.nan)).fillna(0)
 
-    # representative query (mode)
-    if "Query" in d.columns:
-        # compute the most frequent Query per L1,L2
-        rep_query = d.groupby(["L1_Category","L2_Category"])["Query"].agg(_series_mode).reset_index().rename(columns={"Query":"top_query"})
-        grouped = d.groupby(["L1_Category","L2_Category"]).agg(**agg_dict).reset_index().rename(columns=rename_map)
-        grouped = grouped.merge(rep_query, on=["L1_Category","L2_Category"], how="left")
+    # Weights for weighted means
+    w = "Impressions" if "Impressions" in d.columns else ("Clicks" if "Clicks" in d.columns else None)
+    if w is None:
+        d["_w"] = 1.0
     else:
-        grouped = d.groupby(["L1_Category","L2_Category"]).agg(**agg_dict).reset_index().rename(columns=rename_map)
+        d["_w"] = d[w].fillna(0)
 
-    # sort by a sensible metric
-    sort_by = "total_gsc_clicks" if "total_gsc_clicks" in grouped.columns else ("total_pageviews" if "total_pageviews" in grouped.columns else "total_impressions" if "total_impressions" in grouped.columns else "total_articles")
-    return grouped.sort_values(by=sort_by, ascending=False)
+    # Group
+    agg = d.groupby(["L1_Category","L2_Category"], as_index=False).agg(
+        total_articles=("msid","nunique"),
+        total_gsc_clicks=("Clicks","sum") if "Clicks" in d.columns else ("msid","count"),
+        total_impressions=("Impressions","sum") if "Impressions" in d.columns else ("msid","count"),
+        total_pageviews=("screenPageViews","sum") if "screenPageViews" in d.columns else ("msid","count"),
+        total_users=("totalUsers","sum") if "totalUsers" in d.columns else ("msid","count"),
+        avg_engagement_s=("userEngagementDuration","mean") if "userEngagementDuration" in d.columns else ("msid","count"),
+    )
+
+    # Weighted CTR (ΣClicks / ΣImpressions)
+    if {"total_gsc_clicks","total_impressions"}.issubset(agg.columns):
+        agg["ctr_weighted"] = np.where(
+            agg["total_impressions"] > 0,
+            agg["total_gsc_clicks"] / agg["total_impressions"],
+            np.nan
+        )
+    else:
+        agg["ctr_weighted"] = np.nan
+
+    # Weighted Position (by Impressions→best, else Clicks→else equal)
+    if "Position" in d.columns:
+        wp = d.groupby(["L1_Category","L2_Category"]).apply(
+            lambda g: np.average(g["Position"].dropna(), weights=g["_w"].loc[g["Position"].dropna().index])
+                      if g["Position"].notna().any() and g["_w"].sum() > 0 else np.nan
+        ).reset_index(name="avg_position_weighted")
+        agg = agg.merge(wp, on=["L1_Category","L2_Category"], how="left")
+    else:
+        agg["avg_position_weighted"] = np.nan
+
+    # Per-article efficiency
+    agg["users_per_article"] = np.where(agg["total_articles"]>0, agg["total_users"]/agg["total_articles"], np.nan)
+    agg["pvs_per_article"]   = np.where(agg["total_articles"]>0, agg["total_pageviews"]/agg["total_articles"], np.nan)
+    agg["clicks_per_article"]= np.where(agg["total_articles"]>0, agg["total_gsc_clicks"]/agg["total_articles"], np.nan)
+    agg["impr_per_article"]  = np.where(agg["total_articles"]>0, agg["total_impressions"]/agg["total_articles"], np.nan)
+
+    return agg
+def _resolve_cat_metric(metric_choice: str, per_article: bool) -> Tuple[str, str, bool]:
+    """
+    Returns (pretty_label, df_column_name, ascending_sort)
+    ascending_sort=True for 'Avg Position' (lower is better), else False.
+    """
+    if per_article and metric_choice in {"Users","Page Views","Clicks","Impressions"}:
+        col = {
+            "Users":"users_per_article",
+            "Page Views":"pvs_per_article",
+            "Clicks":"clicks_per_article",
+            "Impressions":"impr_per_article",
+        }[metric_choice]
+        return f"{metric_choice} per Article", col, False
+
+    mapping = {
+        "Users": ("total_users", False),
+        "Page Views": ("total_pageviews", False),
+        "Clicks": ("total_gsc_clicks", False),
+        "Impressions": ("total_impressions", False),
+        "Avg Position": ("avg_position_weighted", True),  # lower is better
+    }
+    pretty = metric_choice
+    col, asc = mapping.get(metric_choice, ("total_gsc_clicks", False))
+    return pretty, col, asc
+
 
 def forecast_series(daily_series, periods=14):
     if daily_series is None or len(daily_series) < 7: return None
@@ -1412,42 +1518,85 @@ scatter_engagement_vs_search(filtered_df)
 st.divider()
 
 # Module 5: Category Performance
-st.subheader("Module 3 : Category Performance Analysis")
-st.caption("Performance by category with users, session duration, bounce, representative query, and average position.")
+st.subheader("Category Performance Analysis")
 
+# Build / refresh the aggregate once
 category_results = analyze_category_performance(filtered_df)
-if isinstance(category_results, pd.DataFrame) and not category_results.empty:
-    st.dataframe(category_results, use_container_width=True, hide_index=True)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Category Traffic Distribution")
-        traffic_col = _pick_col(filtered_df, ["Clicks", "screenPageViews", "Impressions"])
-        viz_choice = st.radio("Visualization", ["Treemap (recommended)", "Heatmap"], index=0, horizontal=True)
-        if traffic_col:
-            if viz_choice.startswith("Treemap"):
-                category_treemap(filtered_df, traffic_col, f"Treemap by {traffic_col}")
-            else:
-                category_heatmap(filtered_df, traffic_col, f"Heatmap by {traffic_col}")
-        else:
-            st.info("No traffic metrics (Clicks/Pageviews/Impressions) for visualization.")
-
-    with col2:
-        st.subheader("Top Categories by Performance")
-        perf_col = _pick_col(category_results, ["total_gsc_clicks", "total_pageviews", "total_impressions", "total_users"])
-        if perf_col and _HAS_PLOTLY:
-            top_cats = category_results.nlargest(10, perf_col)
-            fig = px.bar(top_cats, x="L2_Category", y=perf_col, title=f"Top 10 by {perf_col}", color="L1_Category")
-            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-            export_plot_html(fig, f"top_categories_{perf_col}")
-        elif perf_col:
-            st.bar_chart(category_results.nlargest(10, perf_col).set_index("L2_Category")[perf_col])
-        else:
-            st.info("No performance metrics to rank categories.")
-else:
+if not isinstance(category_results, pd.DataFrame) or category_results.empty:
     st.info("Category analysis could not be completed. Check data and mappings.")
+    st.stop()
 
-st.divider()
+# Shared controls (like Module 4)
+ctrl1, ctrl2, ctrl3 = st.columns([0.45, 0.25, 0.30])
+with ctrl1:
+    metric_choice = st.selectbox(
+        "Metric",
+        ["Users","Clicks","Page Views","Impressions","Avg Position"],
+        index=1  # default Clicks
+    )
+with ctrl2:
+    per_article = st.checkbox("Per Article", value=False, help="Efficiency view (disabled for Avg Position)")
+    if metric_choice == "Avg Position":
+        per_article = False
+with ctrl3:
+    topn = st.slider("Top N for ranking", 5, 30, 10, step=1)
+
+pretty, perf_col, sort_asc = _resolve_cat_metric(metric_choice, per_article)
+
+# Show the aggregate table (optional)
+with st.expander("Category table (full)", expanded=False):
+    st.dataframe(category_results, use_container_width=True, hide_index=True)
+    download_df_button(
+        category_results,
+        f"category_aggregate_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        "Download category table (CSV)"
+    )
+
+# Visualizations
+col1, col2 = st.columns(2)
+with col1:
+    st.subheader("Category Traffic Distribution")
+    st.caption("Treemap (recommended)")
+    category_treemap(category_results, metric_choice, per_article)
+    st.caption("Heatmap")
+    category_heatmap(category_results, metric_choice, per_article)
+
+with col2:
+    st.subheader("Top Categories by Performance")
+    # Rank by selected metric
+    if perf_col in category_results.columns:
+        top_cats = (category_results
+                    .dropna(subset=[perf_col])
+                    .sort_values(perf_col, ascending=sort_asc)
+                    .head(topn))
+        # Friendly axis note
+        if metric_choice == "Avg Position":
+            st.caption("Lower = better (avg rank).")
+        else:
+            st.caption("Higher = better.")
+
+        if _HAS_PLOTLY:
+            fig = px.bar(
+                top_cats.sort_values(perf_col, ascending=not sort_asc),
+                x=perf_col, y="L2_Category",
+                color="L1_Category",
+                orientation="h",
+                title=f"Top {topn} by {pretty}"
+            )
+            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+            if "export_plot_html" in globals():
+                export_plot_html(fig, f"top_categories_{perf_col}")
+        else:
+            st.bar_chart(top_cats.set_index("L2_Category")[perf_col])
+
+        download_df_button(
+            top_cats[["L1_Category","L2_Category", perf_col]],
+            f"top_categories_{perf_col}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+            "Download Top categories (CSV)"
+        )
+    else:
+        st.info(f"No data for metric: {pretty}")
+
 
 # Module 6: Trends & Forecasting
 st.subheader("Module 4: Trends & Forecasting")
@@ -1589,6 +1738,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
