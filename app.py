@@ -1515,7 +1515,7 @@ scatter_engagement_vs_search(filtered_df)
 st.divider()
 
 # Module 5: Category Performance
-st.subheader("Category Performance Analysis")
+st.subheader("Module 2 : Category Performance Analysis")
 
 # Build / refresh the aggregate once
 category_results = analyze_category_performance(filtered_df)
@@ -1735,3 +1735,4 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
