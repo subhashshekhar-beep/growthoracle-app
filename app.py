@@ -1170,11 +1170,7 @@ def category_treemap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
         "Download treemap data (CSV)"
     )
 
-
-import textwrap
-
-def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool, all_cat_df: pd.DataFrame = None):
-    """Heatmap that shows ALL categories (even if zero in the current filter), with better sizing/labels."""
+def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool):
     if not _HAS_PLOTLY:
         st.info("Heatmap requires Plotly.")
         return
@@ -1182,102 +1178,38 @@ def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
         st.info("No category data.")
         return
 
-    # 1) Which column to plot
-    pretty, col, _ = _resolve_cat_metric(metric_choice, per_article)
-
+    pretty, col, asc = _resolve_cat_metric(metric_choice, per_article)
     df = cat_df.copy()
 
-    # 2) Pivot (rows=L2, cols=L1)
+    # Pivot: rows=L2, cols=L1 (keeps labels readable)
     try:
         pv = df.pivot_table(
-            index="L2_Category",
-            columns="L1_Category",
-            values=col,
-            aggfunc="sum",
-            fill_value=0
-        )
+            index="L2_Category", columns="L1_Category",
+            values=col, aggfunc="sum"
+        ).fillna(0)
     except Exception:
-        st.info("Not enough variety to draw a heatmap.")
+        st.info("Not enough category variety for a heatmap.")
         return
 
-    # 3) Reindex with ALL categories from RAW (master_df) so empty ones appear as 0
-    if all_cat_df is not None and not all_cat_df.empty:
-        ac = all_cat_df.copy()
-        if "L1_Category" not in ac.columns or "L2_Category" not in ac.columns:
-            if "Path" in ac.columns:
-                cats = ac["Path"].astype(str).str.strip('/').str.split('/', n=2, expand=True)
-                if "L1_Category" not in ac.columns:
-                    ac["L1_Category"] = cats[0].fillna("Uncategorized")
-                if "L2_Category" not in ac.columns:
-                    ac["L2_Category"] = cats[1].fillna("General")
-            else:
-                ac["L1_Category"] = "Uncategorized"
-                ac["L2_Category"] = "General"
-        all_L1 = sorted(ac["L1_Category"].astype(str).fillna("Uncategorized").unique().tolist())
-        all_L2 = sorted(ac["L2_Category"].astype(str).fillna("General").unique().tolist())
-        pv = pv.reindex(index=all_L2, columns=all_L1, fill_value=0)
-
-    # 4) Make labels readable: wrap long names into multiple lines
-    def _wrap_list(vals, width):
-        out = []
-        for v in vals:
-            s = str(v) if v is not None else ""
-            if len(s) > width:
-                s = "<br>".join(textwrap.wrap(s, width=width))
-            out.append(s)
-        return out
-
-    x_labels = _wrap_list(pv.columns, width=10)   # L1 (columns)
-    y_labels = _wrap_list(pv.index,   width=16)   # L2 (rows)
-
-    # 5) Build heatmap with explicit ticks and adaptive size
+    # Build fig
     color_scale = "RdYlGn_r" if metric_choice == "Avg Position" else "RdYlGn"
     fig = px.imshow(
-        pv.values,  # use the numpy array so we can fully control ticktext
-        x=list(range(len(pv.columns))),
-        y=list(range(len(pv.index))),
+        pv,
         labels=dict(x="L1 Category", y="L2 Category", color=pretty),
         color_continuous_scale=color_scale,
         title=f"Heatmap — {pretty}"
     )
-
-    # Ticks: map positions -> wrapped labels
-    fig.update_xaxes(
-        tickmode="array",
-        tickvals=list(range(len(x_labels))),
-        ticktext=x_labels,
-        tickangle=0,            # we wrapped, so angle 0 is ok
-        automargin=True
-    )
-    fig.update_yaxes(
-        tickmode="array",
-        tickvals=list(range(len(y_labels))),
-        ticktext=y_labels,
-        automargin=True
-    )
-
-    # Adaptive figure size: ~90 px per column, ~24 px per row (with caps)
-    width_px  = min(3200, max(900, 120 + 90 * max(1, len(pv.columns))))
-    height_px = min(2400, max(500, 120 + 24 * max(1, len(pv.index))))
-    fig.update_layout(
-        width=width_px,
-        height=height_px,
-        margin=dict(l=160, r=40, t=80, b=180)  # extra bottom for wrapped x labels
-    )
-
-    # 6) Render (disable container width so our width_px is respected)
-    st.plotly_chart(fig, use_container_width=False, theme="streamlit")
-
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
     if "export_plot_html" in globals():
         export_plot_html(fig, f"heatmap_{col}")
 
-    # 7) Download the exact matrix shown
+    # Download the matrix used
+    pv_reset = pv.reset_index()
     download_df_button(
-        pv.reset_index(),
+        pv_reset,
         f"heatmap_matrix_{col}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
         "Download heatmap matrix (CSV)"
     )
-
 
 def _series_mode(series: pd.Series):
     try:
@@ -1583,7 +1515,7 @@ scatter_engagement_vs_search(filtered_df)
 st.divider()
 
 # Module 5: Category Performance
-st.subheader("Module 3 : Category Performance Analysis")
+st.subheader("Category Performance Analysis")
 
 # Build / refresh the aggregate once
 category_results = analyze_category_performance(filtered_df)
@@ -1618,22 +1550,13 @@ with st.expander("Category table (full)", expanded=False):
     )
 
 # Visualizations
-# Build full category list once (unfiltered) so heatmap shows every L1/L2
-all_category_results = analyze_category_performance(master_df)
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("Category Traffic Distribution")
     st.caption("Treemap (recommended)")
     category_treemap(category_results, metric_choice, per_article)
-
     st.caption("Heatmap")
-    # BEFORE (wrong source for complete category list)
-    # all_category_results = analyze_category_performance(master_df)
-    # category_heatmap(category_results, metric_choice, per_article, all_category_results)
-
-    # AFTER (pass RAW master_df so all L1/L2 show up)
-    category_heatmap(category_results, metric_choice, per_article, master_df)
-
+    category_heatmap(category_results, metric_choice, per_article)
 
 with col2:
     st.subheader("Top Categories by Performance")
@@ -1812,8 +1735,3 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
-
-
-
-
-
