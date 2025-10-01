@@ -1170,7 +1170,8 @@ def category_treemap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
         "Download treemap data (CSV)"
     )
 
-def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool):
+def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool, all_cat_df: pd.DataFrame = None):
+    """Heatmap that shows ALL categories (even if zero in the current filter)."""
     if not _HAS_PLOTLY:
         st.info("Heatmap requires Plotly.")
         return
@@ -1178,21 +1179,43 @@ def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
         st.info("No category data.")
         return
 
-    pretty, col, asc = _resolve_cat_metric(metric_choice, per_article)
-    df = cat_df.copy()
+    # Resolve which column to plot based on the UI selection
+    pretty, col, _ = _resolve_cat_metric(metric_choice, per_article)
 
-    # Pivot: rows=L2, cols=L1 (keeps labels readable)
+    df = cat_df.copy()
+    # Ensure category columns exist and are strings
+    for c in ["L1_Category", "L2_Category"]:
+        if c not in df.columns:
+            df[c] = "Uncategorized" if c == "L1_Category" else "General"
+        df[c] = df[c].astype(str).fillna("Uncategorized" if c == "L1_Category" else "General")
+
+    # Pivot to matrix (rows=L2, cols=L1)
     try:
         pv = df.pivot_table(
-            index="L2_Category", columns="L1_Category",
-            values=col, aggfunc="sum"
-        ).fillna(0)
+            index="L2_Category",
+            columns="L1_Category",
+            values=col,
+            aggfunc="sum",
+            fill_value=0
+        )
     except Exception:
-        st.info("Not enough category variety for a heatmap.")
+        st.info("Not enough variety to draw a heatmap.")
         return
 
-    # Build fig
+    # Reindex to include ALL categories from the full dataset (missing => 0)
+    if all_cat_df is not None and not all_cat_df.empty:
+        ac = all_cat_df.copy()
+        for c in ["L1_Category", "L2_Category"]:
+            if c not in ac.columns:
+                ac[c] = "Uncategorized" if c == "L1_Category" else "General"
+            ac[c] = ac[c].astype(str).fillna("Uncategorized" if c == "L1_Category" else "General")
+        all_L1 = sorted(ac["L1_Category"].unique().tolist())
+        all_L2 = sorted(ac["L2_Category"].unique().tolist())
+        pv = pv.reindex(index=all_L2, columns=all_L1, fill_value=0)
+
+    # Color scale: reverse for Avg Position (lower is better)
     color_scale = "RdYlGn_r" if metric_choice == "Avg Position" else "RdYlGn"
+
     fig = px.imshow(
         pv,
         labels=dict(x="L1 Category", y="L2 Category", color=pretty),
@@ -1203,13 +1226,13 @@ def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
     if "export_plot_html" in globals():
         export_plot_html(fig, f"heatmap_{col}")
 
-    # Download the matrix used
-    pv_reset = pv.reset_index()
+    # Download exactly what is shown
     download_df_button(
-        pv_reset,
+        pv.reset_index(),
         f"heatmap_matrix_{col}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
         "Download heatmap matrix (CSV)"
     )
+
 
 def _series_mode(series: pd.Series):
     try:
@@ -1550,13 +1573,15 @@ with st.expander("Category table (full)", expanded=False):
     )
 
 # Visualizations
+# Build full category list once (unfiltered) so heatmap shows every L1/L2
+all_category_results = analyze_category_performance(master_df)
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("Category Traffic Distribution")
     st.caption("Treemap (recommended)")
     category_treemap(category_results, metric_choice, per_article)
     st.caption("Heatmap")
-    category_heatmap(category_results, metric_choice, per_article)
+    category_heatmap(category_results, metric_choice, per_article, all_category_results)
 
 with col2:
     st.subheader("Top Categories by Performance")
@@ -1735,5 +1760,6 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
