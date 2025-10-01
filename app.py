@@ -1077,11 +1077,11 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
 
     # --- Directional guides (axis titles + corner tags + caption) ---
     if x == "Position":
-        fig.update_xaxes(autorange="reversed", title="Position (lower is better ←)")
+        fig.update_xaxes(autorange="reversed", title="Position")
         dircap = f"Left = better rank, Up = higher {y}"
         good_x, bad_x = 0.05, 0.95  # paper coords
     else:
-        fig.update_xaxes(title="CTR (higher →)")
+        fig.update_xaxes(title="CTR")
         dircap = f"Right = higher CTR, Up = higher {y}"
         good_x, bad_x = 0.95, 0.05
     fig.update_yaxes(title=f"{y} (higher ↑)")
@@ -1589,6 +1589,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
