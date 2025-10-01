@@ -1171,8 +1171,10 @@ def category_treemap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
     )
 
 
+import textwrap
+
 def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool, all_cat_df: pd.DataFrame = None):
-    """Heatmap that shows ALL categories (even if zero in the current filter)."""
+    """Heatmap that shows ALL categories (even if zero in the current filter), with better sizing/labels."""
     if not _HAS_PLOTLY:
         st.info("Heatmap requires Plotly.")
         return
@@ -1180,12 +1182,12 @@ def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
         st.info("No category data.")
         return
 
-    # Which column to plot based on the UI selection
+    # 1) Which column to plot
     pretty, col, _ = _resolve_cat_metric(metric_choice, per_article)
 
     df = cat_df.copy()
 
-    # Pivot to matrix (rows=L2, cols=L1)
+    # 2) Pivot (rows=L2, cols=L1)
     try:
         pv = df.pivot_table(
             index="L2_Category",
@@ -1198,12 +1200,10 @@ def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
         st.info("Not enough variety to draw a heatmap.")
         return
 
-    # Reindex using the FULL category list from the RAW dataset (master_df)
+    # 3) Reindex with ALL categories from RAW (master_df) so empty ones appear as 0
     if all_cat_df is not None and not all_cat_df.empty:
         ac = all_cat_df.copy()
-        # Ensure columns exist
         if "L1_Category" not in ac.columns or "L2_Category" not in ac.columns:
-            # Derive categories from Path if needed
             if "Path" in ac.columns:
                 cats = ac["Path"].astype(str).str.strip('/').str.split('/', n=2, expand=True)
                 if "L1_Category" not in ac.columns:
@@ -1217,20 +1217,61 @@ def category_heatmap(cat_df: pd.DataFrame, metric_choice: str, per_article: bool
         all_L2 = sorted(ac["L2_Category"].astype(str).fillna("General").unique().tolist())
         pv = pv.reindex(index=all_L2, columns=all_L1, fill_value=0)
 
-    # Color scale: reverse for Avg Position (lower is better)
-    color_scale = "RdYlGn_r" if metric_choice == "Avg Position" else "RdYlGn"
+    # 4) Make labels readable: wrap long names into multiple lines
+    def _wrap_list(vals, width):
+        out = []
+        for v in vals:
+            s = str(v) if v is not None else ""
+            if len(s) > width:
+                s = "<br>".join(textwrap.wrap(s, width=width))
+            out.append(s)
+        return out
 
+    x_labels = _wrap_list(pv.columns, width=10)   # L1 (columns)
+    y_labels = _wrap_list(pv.index,   width=16)   # L2 (rows)
+
+    # 5) Build heatmap with explicit ticks and adaptive size
+    color_scale = "RdYlGn_r" if metric_choice == "Avg Position" else "RdYlGn"
     fig = px.imshow(
-        pv,
+        pv.values,  # use the numpy array so we can fully control ticktext
+        x=list(range(len(pv.columns))),
+        y=list(range(len(pv.index))),
         labels=dict(x="L1 Category", y="L2 Category", color=pretty),
         color_continuous_scale=color_scale,
         title=f"Heatmap — {pretty}"
     )
-    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+
+    # Ticks: map positions -> wrapped labels
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=list(range(len(x_labels))),
+        ticktext=x_labels,
+        tickangle=0,            # we wrapped, so angle 0 is ok
+        automargin=True
+    )
+    fig.update_yaxes(
+        tickmode="array",
+        tickvals=list(range(len(y_labels))),
+        ticktext=y_labels,
+        automargin=True
+    )
+
+    # Adaptive figure size: ~90 px per column, ~24 px per row (with caps)
+    width_px  = min(3200, max(900, 120 + 90 * max(1, len(pv.columns))))
+    height_px = min(2400, max(500, 120 + 24 * max(1, len(pv.index))))
+    fig.update_layout(
+        width=width_px,
+        height=height_px,
+        margin=dict(l=160, r=40, t=80, b=180)  # extra bottom for wrapped x labels
+    )
+
+    # 6) Render (disable container width so our width_px is respected)
+    st.plotly_chart(fig, use_container_width=False, theme="streamlit")
+
     if "export_plot_html" in globals():
         export_plot_html(fig, f"heatmap_{col}")
 
-    # Download the exact matrix shown
+    # 7) Download the exact matrix shown
     download_df_button(
         pv.reset_index(),
         f"heatmap_matrix_{col}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
@@ -1771,6 +1812,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
