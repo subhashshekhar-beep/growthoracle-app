@@ -985,9 +985,9 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
     with c1:
         x = st.selectbox("Search (X)", x_opts, index=0, help="CTR or Position (left=better when Position).")
     with c2:
-        y = st.selectbox("Engagement (Y)", y_opts, index=0)
+        y = st.selectbox("Engagement (Y)", y_opts, index=0, help="Pick the engagement proxy.")
     with c3:
-        size_col = st.selectbox("Bubble size", size_opts, index=0)
+        size_col = st.selectbox("Bubble size", size_opts, index=0, help="Bigger bubble = more impact.")
     with c4:
         color_col = st.selectbox("Color by", color_opts, index=0)
 
@@ -1005,15 +1005,18 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
             d[c] = pd.to_numeric(d[c], errors="coerce")
 
     # Filters
-    if "Impressions" in d.columns and min_impr > 0: d = d[d["Impressions"] >= min_impr]
-    if "Clicks" in d.columns and min_clicks > 0:    d = d[d["Clicks"] >= min_clicks]
+    if "Impressions" in d.columns and min_impr > 0:
+        d = d[d["Impressions"] >= min_impr]
+    if "Clicks" in d.columns and min_clicks > 0:
+        d = d[d["Clicks"] >= min_clicks]
 
     # Aggregate to one dot per page (weighted by Impressions→best, else Clicks)
     if gran.startswith("One per page"):
         w = "Impressions" if "Impressions" in d.columns else ("Clicks" if "Clicks" in d.columns else None)
         keys = ["msid","Title","L1_Category","L2_Category"]
         for k in keys:
-            if k not in d.columns: d[k] = np.nan
+            if k not in d.columns:
+                d[k] = np.nan
         if w:
             d["_w"] = pd.to_numeric(d[w], errors="coerce").fillna(0)
             grp = d.groupby(keys, as_index=False).agg(
@@ -1047,27 +1050,14 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
     if len(plot_data) > max_points:
         plot_data = plot_data.nlargest(max_points, size_col)
 
-    # Only two views now
+    # Two views only
     view_mode = st.radio("View", ["Scatter (bubbles)", "Scatter + marginals"], index=0, horizontal=True)
-
-    # Tiny legend (super clear)
-    if view_mode.startswith("Scatter"):
-        if x == "Position":
-            st.caption(
-                f"**Legend:** ⬅️ Left / ⬆️ Up = good (better rank + higher {y}). "
-                f"➡️ Right / ⬇️ Down = needs work.  •  Bigger bubble = more {size_col}.  •  Color = {color_col}."
-            )
-        else:  # x == "CTR"
-            st.caption(
-                f"**Legend:** ➡️ Right / ⬆️ Up = good (higher CTR + higher {y}). "
-                f"⬅️ Left / ⬇️ Down = needs work.  •  Bigger bubble = more {size_col}.  •  Color = {color_col}."
-            )
 
     if not _HAS_PLOTLY:
         st.scatter_chart(plot_data, x=x, y=y)
         return
 
-    # Scatter (bubbles)
+    # Build figure
     if view_mode == "Scatter (bubbles)":
         fig = px.scatter(
             plot_data,
@@ -1076,10 +1066,6 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
             size_max=60, opacity=0.8,
             title=f"Engagement ({y}) vs Search ({x})"
         )
-        if x == "Position":
-            fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
-
-    # Scatter + marginals (distributions on axes)
     else:
         fig = px.scatter(
             plot_data,
@@ -1088,45 +1074,33 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
             marginal_x="histogram", marginal_y="violin",
             title=f"Engagement ({y}) vs Search ({x}) — with distributions"
         )
-        if x == "Position":
-            fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
-# --- Make directions obvious ---
-def _axis_titles(x_col: str, y_col: str):
-    if x_col == "Position":
-        xlab = "Position (lower is better ←)"
-        dircap = f"Left = better rank, Up = higher {y_col}"
-        good_x_paper = 0.05   # left
-        bad_x_paper  = 0.95   # right
-    else:  # CTR
-        xlab = "CTR (higher →)"
-        dircap = f"Right = higher CTR, Up = higher {y_col}"
-        good_x_paper = 0.95   # right
-        bad_x_paper  = 0.05   # left
-    ylab = f"{y_col} (higher ↑)"
-    return xlab, ylab, dircap, good_x_paper, bad_x_paper
 
-xlab, ylab, dircap, good_x, bad_x = _axis_titles(x, y)
+    # --- Directional guides (axis titles + corner tags + caption) ---
+    if x == "Position":
+        fig.update_xaxes(autorange="reversed", title="Position (lower is better ←)")
+        dircap = f"Left = better rank, Up = higher {y}"
+        good_x, bad_x = 0.05, 0.95  # paper coords
+    else:
+        fig.update_xaxes(title="CTR (higher →)")
+        dircap = f"Right = higher CTR, Up = higher {y}"
+        good_x, bad_x = 0.95, 0.05
+    fig.update_yaxes(title=f"{y} (higher ↑)")
 
-fig.update_xaxes(title_text=xlab)
-fig.update_yaxes(title_text=ylab)
+    fig.add_annotation(xref="paper", yref="paper", x=good_x, y=0.95,
+                       text="✅ Good", showarrow=False,
+                       bgcolor="rgba(0,200,0,0.12)", bordercolor="rgba(0,150,0,0.4)", borderwidth=1)
+    fig.add_annotation(xref="paper", yref="paper", x=bad_x, y=0.05,
+                       text="⚠️ Needs work", showarrow=False,
+                       bgcolor="rgba(255,0,0,0.08)", bordercolor="rgba(200,0,0,0.35)", borderwidth=1)
 
-# Corner helper tags (paper coords: 0..1); just small hints, not quadrants
-fig.add_annotation(xref="paper", yref="paper", x=good_x, y=0.95,
-                   text="✅ Good", showarrow=False,
-                   bgcolor="rgba(0,200,0,0.12)", bordercolor="rgba(0,150,0,0.4)", borderwidth=1)
-fig.add_annotation(xref="paper", yref="paper", x=bad_x, y=0.05,
-                   text="⚠️ Needs work", showarrow=False,
-                   bgcolor="rgba(255,0,0,0.08)", bordercolor="rgba(200,0,0,0.35)", borderwidth=1)
+    st.caption(
+        f"**How to read:** {dircap}.  Bigger bubble = more {size_col}.  Color = {color_col}."
+    )
 
-# Simple one-line legend under the controls
-st.caption(
-    f"**How to read:** {dircap}.  Bigger bubble = more {size_col}.  Color = {color_col}."
-)
-
+    # Render + export + data download
     st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-    if "export_plot_html" in globals(): export_plot_html(fig, "engagement_vs_search")
-
-    # Download the data shown in the chart
+    if "export_plot_html" in globals():
+        export_plot_html(fig, "engagement_vs_search")
     download_df_button(
         plot_data,
         f"scatter_data_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
@@ -1626,5 +1600,6 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
