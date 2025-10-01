@@ -1399,7 +1399,7 @@ scatter_engagement_vs_search(filtered_df)
 st.divider()
 
 # Module 5: Category Performance
-st.subheader("Module 2 : Category Performance Analysis")
+st.subheader("Module 3 : Category Performance Analysis")
 st.caption("Performance by category with users, session duration, bounce, representative query, and average position.")
 
 category_results = analyze_category_performance(filtered_df)
@@ -1437,7 +1437,7 @@ else:
 st.divider()
 
 # Module 6: Trends & Forecasting
-st.subheader("Module 3: Trends & Forecasting")
+st.subheader("Module 4: Trends & Forecasting")
 st.caption("We’ve removed the 'Clicks over time' chart per your request. Choose a different trend metric below. The forecast shows dashed line with a shaded 95% interval.")
 
 if "date" in filtered_df.columns and not filtered_df.empty:
@@ -1488,7 +1488,7 @@ else:
 
 # --- Growth Efficiency (Resources → Outcomes) ---
 st.divider()
-st.subheader("📈 Module 4: Growth Efficiency — Resources → Outcomes")
+st.subheader("📈 Module 5: Growth Efficiency — Resources → Outcomes")
 
 cat_eff = compute_category_efficiency(filtered_df)
 if cat_eff is None or cat_eff.empty:
@@ -1576,6 +1576,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
