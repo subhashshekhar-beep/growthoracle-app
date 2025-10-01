@@ -1424,9 +1424,6 @@ def plot_efficiency_quadrant(cat_df: pd.DataFrame, outcome: str, y_mode: str = "
     fig.add_vline(x=x_med, line_dash="dash", opacity=0.4)
 
     # Annotations for quadrants
-    fig.add_annotation(x=x_med*0.5, y=y_med*1.1, text="Under-invested winners\n(Low input, High output)", showarrow=False)
-    fig.add_annotation(x=x_med*1.5 if x_med>0 else 1, y=y_med*0.6, text="Over-invested laggards\n(High input, Low output)", showarrow=False)
-
     fig.update_layout(margin=dict(l=10,r=10,t=50,b=10))
     st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
@@ -1738,6 +1735,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
