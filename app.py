@@ -963,11 +963,7 @@ def build_engagement_mismatch_table(df: pd.DataFrame) -> pd.DataFrame:
     return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"])
 
 def scatter_engagement_vs_search(df: pd.DataFrame):
-    """
-    Clean, kid-simple 'Engagement vs Search' with two views:
-      1) Scatter (bubbles) — de-noised and deduplicated
-      2) Top Pages (bar) — easy to read ranking
-    """
+    """Configurable 'Engagement vs Search' with multiple view modes."""
     if df is None or df.empty:
         st.info("No data available for scatter plot")
         return
@@ -989,32 +985,28 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
     with c1:
         x = st.selectbox("Search (X)", x_opts, index=0, help="CTR or Position (left=better when Position).")
     with c2:
-        y = st.selectbox("Engagement (Y)", y_opts, index=0, help="Pick the engagement proxy.")
+        y = st.selectbox("Engagement (Y)", y_opts, index=0)
     with c3:
-        size_col = st.selectbox("Bubble size", size_opts, index=0, help="Bigger bubble = more impact.")
+        size_col = st.selectbox("Bubble size", size_opts, index=0)
     with c4:
         color_col = st.selectbox("Color by", color_opts, index=0)
 
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3 = st.columns(3)
     with f1:
-        min_impr = st.number_input("Min Impressions", min_value=0, value=300, step=50) if "Impressions" in d.columns else 0
+        min_impr = st.number_input("Min Impressions", min_value=0, value=200, step=50) if "Impressions" in d.columns else 0
     with f2:
-        min_clicks = st.number_input("Min Clicks", min_value=0, value=10, step=5) if "Clicks" in d.columns else 0
+        min_clicks = st.number_input("Min Clicks", min_value=0, value=5, step=5) if "Clicks" in d.columns else 0
     with f3:
         gran = st.radio("Granularity", ["Raw (date×query×page)", "One per page (weighted)"], index=1, horizontal=True)
-    with f4:
-        view_mode = st.radio("View", ["Scatter (bubbles)", "Top Pages (bar)"], index=0, horizontal=True)
 
     # Clean numerics quickly
-    for c in list({x, y, size_col} | {"CTR","Position","Clicks","Impressions","screenPageViews","totalUsers"}):
+    for c in list({x, y, size_col} | {"CTR","Position","Clicks","Impressions"}):
         if c in d.columns:
             d[c] = pd.to_numeric(d[c], errors="coerce")
 
     # Filters
-    if "Impressions" in d.columns and min_impr > 0:
-        d = d[d["Impressions"] >= min_impr]
-    if "Clicks" in d.columns and min_clicks > 0:
-        d = d[d["Clicks"] >= min_clicks]
+    if "Impressions" in d.columns and min_impr > 0: d = d[d["Impressions"] >= min_impr]
+    if "Clicks" in d.columns and min_clicks > 0:    d = d[d["Clicks"] >= min_clicks]
 
     # Aggregate to one dot per page (weighted by Impressions→best, else Clicks)
     if gran.startswith("One per page"):
@@ -1050,98 +1042,57 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
         st.info("No points left after filters.")
         return
 
-    # --- Anti-clutter controls ---
-    cc1, cc2, cc3 = st.columns(3)
-    with cc1:
-        max_points = st.slider("Max points to show", 50, 3000, 300, step=50, help="Keeps only the biggest bubbles.")
-    with cc2:
-        grid_on = st.checkbox("Grid de-dup (reduce overlap)", value=True, help="Bins X & Y, keeps the biggest bubble per bin.")
-    with cc3:
-        label_top = st.checkbox("Label top 10 bubbles", value=False)
-
-    # Keep only the biggest bubbles
+    # Limit points for readability
+    max_points = st.slider("Max points", 500, 10000, 3000, step=500)
     if len(plot_data) > max_points:
         plot_data = plot_data.nlargest(max_points, size_col)
 
-    # Grid de-dup: bin X & Y, keep the largest bubble in each bin
-    if grid_on:
-        pd2 = plot_data.copy()
-        if x == "CTR":
-            # bin CTR in percentage points (1% bins)
-            pd2["_xbin"] = (pd2["CTR"]*100).round().astype(int)
-        else:  # Position
-            pd2["_xbin"] = (pd2["Position"]*2).round().astype(int)  # 0.5-rank bins
-        # Y binning: coarse 20 buckets
-        pd2["_ybin"] = pd.qcut(pd2[y], q=min(20, max(5, int(pd2[y].nunique()))), duplicates="drop", labels=False)
-        # Within each (xbin,ybin,color), keep the biggest bubble
-        keep_idx = pd2.groupby(["_xbin","_ybin", color_col], dropna=False)[size_col].idxmax()
-        plot_data = plot_data.loc[keep_idx.values]
+    # --- NEW: multiple view modes ---
+    view_mode = st.radio("View", ["Scatter (bubbles)", "Density heatmap", "Scatter + marginals", "Quadrants"], index=0, horizontal=True)
 
-    # === VIEW 1: Scatter (bubbles) ===
-    if view_mode.startswith("Scatter"):
-        if _HAS_PLOTLY:
-            fig = px.scatter(
-                plot_data,
-                x=x, y=y, size=size_col, color=color_col,
-                hover_data=[c for c in ["msid","Title","Query","date"] if c in plot_data.columns],
-                size_max=60, opacity=0.8,
-                title=f"Engagement ({y}) vs Search ({x})"
-            )
-            if x == "Position":
-                fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
-            # Optional labels
-            if label_top:
-                top = plot_data.nlargest(10, size_col)
-                fig.add_trace(go.Scatter(
-                    x=top[x], y=top[y], mode="text",
-                    text=top["Title"].astype(str).str.slice(0, 28),
-                    textposition="top center",
-                    showlegend=False
-                ))
-            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-            if "export_plot_html" in globals(): export_plot_html(fig, "engagement_vs_search")
-        else:
-            st.scatter_chart(plot_data, x=x, y=y, color=color_col)
+    if not _HAS_PLOTLY:
+        st.scatter_chart(plot_data, x=x, y=y)
+        return
 
-        download_df_button(plot_data, f"scatter_data_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-                           "Download plotted points (CSV)")
-
-    # === VIEW 2: Top Pages (bar) — super simple ranking ===
+    if view_mode == "Density heatmap":
+        fig = px.density_heatmap(plot_data, x=x, y=y, nbinsx=40, nbinsy=40, color_continuous_scale="Viridis",
+                                 title=f"Density of Engagement ({y}) vs Search ({x})")
+        if x == "Position": fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
+    elif view_mode == "Scatter + marginals":
+        fig = px.scatter(plot_data, x=x, y=y, size=size_col, color=color_col, opacity=0.65,
+                         hover_data=[c for c in ["msid","Title","Query","date"] if c in plot_data.columns],
+                         marginal_x="histogram", marginal_y="violin",
+                         title=f"Engagement ({y}) vs Search ({x}) — with distributions")
+        if x == "Position": fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
     else:
-        # Build one-row-per-page table if needed
-        if "msid" in plot_data.columns:
-            # If current data is instance-level, roll up by msid for bars
-            bars = plot_data.copy()
-            if gran.startswith("Raw"):
-                keys = ["msid","Title", color_col]
-                bars = bars.groupby(keys, as_index=False).agg(
-                    size_val=(size_col,"sum"),
-                    x_val=(x,"mean"),  # not used for height, just hover context
-                    y_val=(y,"mean")
-                ).rename(columns={"size_val": size_col, "x_val": x, "y_val": y})
-        else:
-            bars = plot_data
+        # Scatter and Quadrants share the same base fig
+        fig = px.scatter(plot_data, x=x, y=y, size=size_col, color=color_col, opacity=0.65,
+                         hover_data=[c for c in ["msid","Title","Query","date"] if c in plot_data.columns],
+                         trendline="ols", size_max=60,
+                         title=f"Engagement ({y}) vs Search ({x})")
+        if x == "Position": fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
 
-        bars = bars.nlargest(max_points, size_col)
+        if view_mode == "Quadrants":
+            x_med = np.nanmedian(plot_data[x]); y_med = np.nanmedian(plot_data[y])
+            fig.add_vline(x=x_med, line_dash="dash", opacity=0.4)
+            fig.add_hline(y=y_med, line_dash="dash", opacity=0.4)
+            # Quadrant labels (handle CTR vs Position)
+            left_is_good = (x == "Position")
+            fig.add_annotation(x=x_med*0.9 if not left_is_good else x_med*0.6, y=y_med*1.05,
+                               text="Good Search + Good Engagement", showarrow=False)
+            fig.add_annotation(x=x_med*0.9 if not left_is_good else x_med*0.6, y=y_med*0.6,
+                               text="Good Search + Low Engagement", showarrow=False)
+            fig.add_annotation(x=x_med*1.1 if not left_is_good else x_med*1.4, y=y_med*1.05,
+                               text="Low Search + Good Engagement", showarrow=False)
+            fig.add_annotation(x=x_med*1.1 if not left_is_good else x_med*1.4, y=y_med*0.6,
+                               text="Low Search + Low Engagement", showarrow=False)
 
-        if _HAS_PLOTLY:
-            fig = px.bar(
-                bars.nlargest(25, size_col).sort_values(size_col),
-                x=size_col, y=bars["Title"].astype(str).str.slice(0, 60),
-                color=color_col,
-                orientation="h",
-                title=f"Top Pages by {size_col}"
-            )
-            st.plotly_chart(fig, use_container_width=True, theme="streamlit")
-            if "export_plot_html" in globals(): export_plot_html(fig, f"top_pages_{size_col}")
-        else:
-            st.bar_chart(bars.set_index("Title")[size_col].nlargest(25))
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+    if "export_plot_html" in globals(): export_plot_html(fig, "engagement_vs_search")
 
-        download_df_button(bars[["msid","Title", color_col, size_col]],
-                           f"top_pages_{size_col}_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-                           "Download top pages (CSV)")
-
-
+    # Download the data shown in the chart
+    download_df_button(plot_data, f"scatter_data_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                       "Download plotted points (CSV)")
 # --- Utility: Export Plotly figure as downloadable HTML (NEW) ---
 def export_plot_html(fig, name: str):
     """Show a download button to export a Plotly fig as a standalone HTML file."""
@@ -1634,17 +1585,3 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
