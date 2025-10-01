@@ -1086,17 +1086,6 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
         good_x, bad_x = 0.95, 0.05
     fig.update_yaxes(title=f"{y} (higher ↑)")
 
-    fig.add_annotation(xref="paper", yref="paper", x=good_x, y=0.95,
-                       text="✅ Good", showarrow=False,
-                       bgcolor="rgba(0,200,0,0.12)", bordercolor="rgba(0,150,0,0.4)", borderwidth=1)
-    fig.add_annotation(xref="paper", yref="paper", x=bad_x, y=0.05,
-                       text="⚠️ Needs work", showarrow=False,
-                       bgcolor="rgba(255,0,0,0.08)", bordercolor="rgba(200,0,0,0.35)", borderwidth=1)
-
-    st.caption(
-        f"**How to read:** {dircap}.  Bigger bubble = more {size_col}.  Color = {color_col}."
-    )
-
     # Render + export + data download
     st.plotly_chart(fig, use_container_width=True, theme="streamlit")
     if "export_plot_html" in globals():
@@ -1600,6 +1589,7 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
 
 
 
