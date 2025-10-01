@@ -963,7 +963,7 @@ def build_engagement_mismatch_table(df: pd.DataFrame) -> pd.DataFrame:
     return d[["Mismatch_Tag"] + keep_cols].sort_values(["Mismatch_Tag","msid"])
 
 def scatter_engagement_vs_search(df: pd.DataFrame):
-    """Configurable 'Engagement vs Search' with multiple view modes."""
+    """Clean 'Engagement vs Search' with two simple views: Scatter (bubbles) and Scatter + marginals."""
     if df is None or df.empty:
         st.info("No data available for scatter plot")
         return
@@ -1047,52 +1047,61 @@ def scatter_engagement_vs_search(df: pd.DataFrame):
     if len(plot_data) > max_points:
         plot_data = plot_data.nlargest(max_points, size_col)
 
-    # --- NEW: multiple view modes ---
-    view_mode = st.radio("View", ["Scatter (bubbles)", "Density heatmap", "Scatter + marginals", "Quadrants"], index=0, horizontal=True)
+    # Only two views now
+    view_mode = st.radio("View", ["Scatter (bubbles)", "Scatter + marginals"], index=0, horizontal=True)
+
+    # Tiny legend (super clear)
+    if view_mode.startswith("Scatter"):
+        if x == "Position":
+            st.caption(
+                f"**Legend:** ⬅️ Left / ⬆️ Up = good (better rank + higher {y}). "
+                f"➡️ Right / ⬇️ Down = needs work.  •  Bigger bubble = more {size_col}.  •  Color = {color_col}."
+            )
+        else:  # x == "CTR"
+            st.caption(
+                f"**Legend:** ➡️ Right / ⬆️ Up = good (higher CTR + higher {y}). "
+                f"⬅️ Left / ⬇️ Down = needs work.  •  Bigger bubble = more {size_col}.  •  Color = {color_col}."
+            )
 
     if not _HAS_PLOTLY:
         st.scatter_chart(plot_data, x=x, y=y)
         return
 
-    if view_mode == "Density heatmap":
-        fig = px.density_heatmap(plot_data, x=x, y=y, nbinsx=40, nbinsy=40, color_continuous_scale="Viridis",
-                                 title=f"Density of Engagement ({y}) vs Search ({x})")
-        if x == "Position": fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
-    elif view_mode == "Scatter + marginals":
-        fig = px.scatter(plot_data, x=x, y=y, size=size_col, color=color_col, opacity=0.65,
-                         hover_data=[c for c in ["msid","Title","Query","date"] if c in plot_data.columns],
-                         marginal_x="histogram", marginal_y="violin",
-                         title=f"Engagement ({y}) vs Search ({x}) — with distributions")
-        if x == "Position": fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
-    else:
-        # Scatter and Quadrants share the same base fig
-        fig = px.scatter(plot_data, x=x, y=y, size=size_col, color=color_col, opacity=0.65,
-                         hover_data=[c for c in ["msid","Title","Query","date"] if c in plot_data.columns],
-                         trendline="ols", size_max=60,
-                         title=f"Engagement ({y}) vs Search ({x})")
-        if x == "Position": fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
+    # Scatter (bubbles)
+    if view_mode == "Scatter (bubbles)":
+        fig = px.scatter(
+            plot_data,
+            x=x, y=y, size=size_col, color=color_col,
+            hover_data=[c for c in ["msid","Title","Query","date"] if c in plot_data.columns],
+            size_max=60, opacity=0.8,
+            title=f"Engagement ({y}) vs Search ({x})"
+        )
+        if x == "Position":
+            fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
 
-        if view_mode == "Quadrants":
-            x_med = np.nanmedian(plot_data[x]); y_med = np.nanmedian(plot_data[y])
-            fig.add_vline(x=x_med, line_dash="dash", opacity=0.4)
-            fig.add_hline(y=y_med, line_dash="dash", opacity=0.4)
-            # Quadrant labels (handle CTR vs Position)
-            left_is_good = (x == "Position")
-            fig.add_annotation(x=x_med*0.9 if not left_is_good else x_med*0.6, y=y_med*1.05,
-                               text="Good Search + Good Engagement", showarrow=False)
-            fig.add_annotation(x=x_med*0.9 if not left_is_good else x_med*0.6, y=y_med*0.6,
-                               text="Good Search + Low Engagement", showarrow=False)
-            fig.add_annotation(x=x_med*1.1 if not left_is_good else x_med*1.4, y=y_med*1.05,
-                               text="Low Search + Good Engagement", showarrow=False)
-            fig.add_annotation(x=x_med*1.1 if not left_is_good else x_med*1.4, y=y_med*0.6,
-                               text="Low Search + Low Engagement", showarrow=False)
+    # Scatter + marginals (distributions on axes)
+    else:
+        fig = px.scatter(
+            plot_data,
+            x=x, y=y, size=size_col, color=color_col, opacity=0.75, size_max=60,
+            hover_data=[c for c in ["msid","Title","Query","date"] if c in plot_data.columns],
+            marginal_x="histogram", marginal_y="violin",
+            title=f"Engagement ({y}) vs Search ({x}) — with distributions"
+        )
+        if x == "Position":
+            fig.update_xaxes(autorange="reversed", title="Position (lower is better)")
 
     st.plotly_chart(fig, use_container_width=True, theme="streamlit")
     if "export_plot_html" in globals(): export_plot_html(fig, "engagement_vs_search")
 
     # Download the data shown in the chart
-    download_df_button(plot_data, f"scatter_data_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-                       "Download plotted points (CSV)")
+    download_df_button(
+        plot_data,
+        f"scatter_data_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        "Download plotted points (CSV)"
+    )
+
+
 # --- Utility: Export Plotly figure as downloadable HTML (NEW) ---
 def export_plot_html(fig, name: str):
     """Show a download button to export a Plotly fig as a standalone HTML file."""
@@ -1585,3 +1594,4 @@ else:
 # Footer
 st.markdown("---")
 st.caption("GrowthOracle AI v2.0 | End of Report")
+
